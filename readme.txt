@@ -20,17 +20,23 @@ cd automata
 
 pip install -r requirements.txt
 
-# 4. Guardar dependencias
+# 4. si desea guardar dependencias
 
 pip freeze > requirements.txt
 
 
 # 5. Configuración
 
-Antes de ejecutar el proyecto, debes crear el archivo de configuración a partir de la plantilla:
+Antes de ejecutar el proyecto, debe crear el archivo de configuración a partir de la plantilla:
 
 1. Copia el archivo `config.example.py` y renómbralo como `config.py`.
 2. Abre `config.py` y edita las siguientes variables con tus datos:
    - `apikey`: Tu clave de API.
    - `rutamaestro`: La ruta al directorio maestro.
    - `rutatemporal`: La ruta al directorio temporal.
+
+# 6. Ejecución
+
+Para iniciar el proceso se debe ejecutar el archivo principal:
+
+python3 controller.py

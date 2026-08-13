@@ -1,82 +1,210 @@
-PROMPT_POR_NOMBRE = """
+# ==============================================================================
+# 1. SUPERDICCIONARIO DE CATEGORÍAS
+# ==============================================================================
+
+CATEGORIAS = {
+    "documento_id": {
+        "rename": "01_documento_id",
+        "descripcion": "Documento de Identidad (Cédula de ciudadanía, cédula de extranjería, pasaporte, PPT). NO incluir licencias de conducción ni libretas militares.",
+        "requerimientos_especificos": {
+            "tipo_documento": "Buscar en el documento el tipo de documento de identidad (cédula, pasaporte, etc.) y guardarlo como string"
+        }
+    },
+    "contrato_laboral": {
+        "rename": "02_contrato_laboral",
+        "descripcion": "Contrato de Trabajo, contrato laboral firmado, otrosí o adendas.",
+        "requerimientos_especificos": {
+            "fecha_inicio": "Fecha de inicio de labores",
+            "esta_firmado": "Verificar si los espacios para firma del trabajador están firmados por el candidato"
+        }
+    },
+    "curso_etica": {
+        "rename": "03_curso_etica",
+        "descripcion": "Certificado o constancia del Curso de Ética (Códigos de ética, SAGRILAFT, conducta).",
+        "requerimientos_especificos": {
+            "nombre_curso": "Nombre del curso impartido"
+        }
+    },
+    "curso_transparencia": {
+        "rename": "04_curso_transparencia",
+        "descripcion": "Certificado o constancia del Curso de Transparencia o Anticorrupción (PTEE, anticorrupción).",
+        "requerimientos_especificos": {
+            "nombre_curso": "Nombre del curso impartido"
+        }
+    },
+    "curso_cultura": {
+        "rename": "05_curso_cultura",
+        "descripcion": "Certificado o constancia del Curso de Cultura Organizacional (Inducción corporativa, SGSST, clima organizacional).",
+        "requerimientos_especificos": {
+            "nombre_curso": "Nombre del curso impartido"
+        }
+    },
+    "pruebas_psicotecnicas": {
+        "rename": "06_pruebas_psicotecnicas",
+        "descripcion": "Resultados o informes de Pruebas Psicotécnicas.",
+        "requerimientos_especificos": {}
+    },
+    "verificacion_referencias": {
+        "rename": "07_verificacion_referencias",
+        "descripcion": "Formato o informe de Verificación de Referencias.",
+        "requerimientos_especificos": {}
+    },
+    "arl": {
+        "rename": "08_arl",
+        "descripcion": "Certificado de afiliación a ARL (Riesgos Laborales).",
+        "requerimientos_especificos": {}
+    },
+    "ccf": {
+        "rename": "09_ccf",
+        "descripcion": "Certificado de afiliación a CCF (Caja de Compensación Familiar).",
+        "requerimientos_especificos": {}
+    },
+    "examen_medico_ingreso": {
+        "rename": "10_examen_medico_ingreso",
+        "descripcion": "Concepto o examen médico ocupacional o de ingreso.",
+        "requerimientos_especificos": {}
+    },
+    "antecedente_policia": {
+        "rename": "11_antecedente_policia",
+        "descripcion": "Certificado de Antecedentes de la Policía Nacional.",
+        "requerimientos_especificos": {
+            "tiene_antecedentes": "Verificar que NO registre antecedentes"
+        }
+    },
+    "antecedente_procuraduria": {
+        "rename": "12_antecedente_procuraduria",
+        "descripcion": "Certificado de Antecedentes de la Procuraduría General.",
+        "requerimientos_especificos": {
+            "tiene_antecedentes": "Verificar que NO registre antecedentes"
+        }
+    },
+    "antecedente_contraloria": {
+        "rename": "13_antecedente_contraloria",
+        "descripcion": "Certificado de Antecedentes Fiscales de la Contraloría.",
+        "requerimientos_especificos": {
+            "tiene_antecedentes": "Verificar que NO registre antecedentes"
+        }
+    },
+    "cuenta_bancaria": {
+        "rename": "14_cuenta_bancaria",
+        "descripcion": "Certificación bancaria o soporte de Cuenta Bancaria para pago de nómina.",
+        "requerimientos_especificos": {
+            "numero_cuenta": "Número de cuenta bancaria registrado"
+        }
+    },
+    "pension": {
+        "rename": "15_pension",
+        "descripcion": "Certificado de afiliación o historial de Pensiones (Protección, Porvenir, Colpensiones, etc.).",
+        "requerimientos_especificos": {
+            "es_valido": "Verificar que corresponda a un fondo de pensiones y/o cesantías"
+        }
+    },
+    "cesantias": {
+        "rename": "16_cesantias",
+        "descripcion": "Certificado o constancia de afiliación a Cesantías.",
+        "requerimientos_especificos": {
+            "es_valido": "Verificar que corresponda a un fondo de pensiones y/o cesantías"
+        }
+    },
+    "eps": {
+        "rename": "17_eps",
+        "descripcion": "Certificado de afiliación a EPS (Sura, Sanitas, Compensar, etc.) o ADRES.",
+        "requerimientos_especificos": {}
+    },
+    "referencias": {
+        "rename": "18_referencias",
+        "descripcion": "Cartas o soportes generales de Referencias.",
+        "requerimientos_especificos": {}
+    },
+    "estudios": {
+        "rename": "19_estudios",
+        "descripcion": "Títulos de estudio, diplomas, actas de grado o certificados académicos (Colegios, Universidades, SENA, diplomados).",
+        "requerimientos_especificos": {
+            "es_bachillerato": "Verificar si el título o estudio corresponde a bachillerato"
+        }
+    },
+    "referencia_personal": {
+        "rename": "20_referencia_personal",
+        "descripcion": "Carta de Referencia Personal o familiar.",
+        "requerimientos_especificos": {
+            "fecha_reciente": "Verificar que la fecha sea reciente con relación al contrato",
+            "esta_firmada": "Verificar que esté firmada por quien emite la referencia"
+        }
+    },
+    "referencia_laboral": {
+        "rename": "21_referencia_laboral",
+        "descripcion": "Certificado Laboral o Referencia Laboral de empleos anteriores.",
+        "requerimientos_especificos": {
+            "indica_prestacion_servicio": "Corroborar que se indique que el candidato laboró o prestó servicios en la empresa",
+            "esta_firmada": "Verificar que esté firmada"
+        }
+    },
+    "hoja_de_vida": {
+        "rename": "22_hoja_de_vida",
+        "descripcion": "Hoja de Vida (HV) o Curriculum Vitae.",
+        "requerimientos_especificos": {}
+    },
+    "formatos_para_la_contratacion": {
+        "rename": "23_formatos_para_la_contratacion",
+        "descripcion": "Formatos diligenciados para la contratación (autorizaciones, tratamiento de datos, listas de chequeo).",
+        "requerimientos_especificos": {
+            "conteo_hojas": "Verificar que como mínimo sean 9 hojas",
+            "hojas_diligenciadas": "Verificar que las hojas estén diligenciadas y firmadas por el candidato"
+        }
+    }
+}
+
+
+# ==============================================================================
+# 2. GENERADOR AUTOMÁTICO DE LA LISTA DE CATEGORÍAS PARA PROMPTS
+# ==============================================================================
+
+# Construye la lista de categorías dinámicamente desde el Superdiccionario
+lista_prompt_lineas = [
+    f"- {info['descripcion']} -> OUTPUT: {info['rename']}"
+    for info in CATEGORIAS.values()
+]
+LISTA_CATEGORIAS_PROMPT = "\n".join(lista_prompt_lineas)
+
+
+# ==============================================================================
+# 3. PROMPTS DE CLASIFICACIÓN Y RENOMBRADO (FASE 1)
+# ==============================================================================
+
+PROMPT_POR_NOMBRE = f"""
 Tu única tarea es analizar el NOMBRE DE UN ARCHIVO y clasificarlo dentro de UNA de las siguientes categorías predefinidas.
 
 ### LISTA DE CATEGORÍAS Y OUTPUTS PERMITIDOS:
-- Documento de Identidad (Cédula, pasaporte, PPT). -> OUTPUT: 01_documento_id
-- Contrato de Trabajo, contrato laboral, otrosi. -> OUTPUT: 02_contrato_laboral
-- Certificado o constancia del Curso de Ética. -> OUTPUT: 03_curso_etica
-- Certificado o constancia del Curso de Transparencia o Anticorrupción. -> OUTPUT: 04_curso_transparencia
-- Certificado o constancia del Curso de Cultura Organizacional. -> OUTPUT: 05_curso_cultura
-- Resultados o informes de Pruebas Psicotécnicas. -> OUTPUT: 06_pruebas_psicotecnicas
-- Formato o informe de Verificación de Referencias. -> OUTPUT: 07_verificacion_referencias
-- Certificado de afiliación a ARL (Riesgos Laborales). -> OUTPUT: 08_arl
-- Certificado de afiliación a CCF (Caja de Compensación). -> OUTPUT: 09_ccf
-- Examen Médico Ocupacional o de Ingreso. -> OUTPUT: 10_examen_medico_ingreso
-- Certificado de Antecedentes de la Policía. -> OUTPUT: 11_antecedente_policia
-- Certificado de Antecedentes de la Procuraduría. -> OUTPUT: 12_antecedente_procuraduria
-- Certificado de Antecedentes de la Contraloría. -> OUTPUT: 13_antecedente_contraloria
-- Certificación bancaria o Cuenta Bancaria. -> OUTPUT: 14_cuenta_bancaria
-- Certificado o historial de Pensiones (Protección, Porvenir, Colpensiones). -> OUTPUT: 15_pension
-- Certificado de afiliación a Cesantías. -> OUTPUT: 16_cesantias
-- Certificado de afiliación a EPS (Sura, Sanitas, Compensar, ADRES). -> OUTPUT: 17_eps
-- Cartas o soportes generales de Referencias. -> OUTPUT: 18_referencias
-- Títulos de estudio, diplomas, actas de grado. -> OUTPUT: 19_estudios
-- Carta de Referencia Personal o familiar. -> OUTPUT: 20_referencia_personal
-- Certificado Laboral o Referencia Laboral anterior. -> OUTPUT: 21_referencia_laboral
-- Hoja de Vida (HV) o Curriculum Vitae. -> OUTPUT: 22_hoja_de_vida
-- Formatos para contratación (autorizaciones, tratamiento datos). -> OUTPUT: 23_formatos_para_la_contratacion
+{LISTA_CATEGORIAS_PROMPT}
 
 ### REGLA DE AMBIGÜEDAD (ULTRA ESTRICTO):
 Cualquier nombre que contenga palabras genéricas como "curso", "diploma", "certificado", "certificacion", "acta", "soporte", "copia", "doc", "scan", "foto" o nombres de archivos numéricos/ambiguos DEBE SER RECHAZADO, A MENOS QUE el nombre especifique de forma 100% inconfundible la categoría exacta (por ejemplo: "antecedentes_policia.pdf" o "cedula_juan.pdf"). Si hay la más mínima duda o falta de claridad, RESPONDE SIEMPRE: REVISAR_CONTENIDO.
 
 ### REGLAS DE RESPUESTA (ESTRICTO):
 1. Evalúa ÚNICAMENTE el texto del nombre del archivo que se te proporciona.
-2. Si el nombre sugiere claramente y SIN AMBIGÜEDAD una categoría, responde ÚNICAMENTE con la clave del OUTPUT (ejemplo: 01_documento_id).
+2. Si el nombre sugiere claramente y SIN AMBIGÜEDAD una categoría, responde ÚNICAMENTE con la clave del OUTPUT (ejemplo: {CATEGORIAS['documento_id']['rename']}).
 3. Si el nombre es ambiguo, genérico o no coincide con claridad absoluta, responde exactamente: REVISAR_CONTENIDO
 4. PROHIBIDO usar comillas, comillas simples, espacios al inicio o al final, saltos de línea, explicaciones o formato markdown. Devuelve SOLO la clave limpia.
 """
 
-PROMPT_POR_CONTENIDO = """
+PROMPT_POR_CONTENIDO = f"""
 Tu única tarea es analizar exhaustivamente el CONTENIDO VISUAL / TEXTUAL de este documento y clasificarlo dentro de UNA de las siguientes categorías predefinidas.
 
 ### LISTA DE CATEGORÍAS Y OUTPUTS PERMITIDOS:
-- Documento de Identidad (Cédula de ciudadanía, cédula de extranjería, pasaporte, PPT). NO incluir licencias de conducción ni libretas militares. -> OUTPUT: 01_documento_id
-- Contrato de Trabajo, contrato laboral firmado, otrosi o adendas. -> OUTPUT: 02_contrato_laboral
-- Certificado o constancia del Curso de Ética (Códigos de ética, SAGRILAFT, conducta). -> OUTPUT: 03_curso_etica
-- Certificado o constancia del Curso de Transparencia o Anticorrupción (PTEE, anticorrupción). -> OUTPUT: 04_curso_transparencia
-- Certificado o constancia del Curso de Cultura Organizacional (Inducción corporativa, SGSST, clima organizacional). -> OUTPUT: 05_curso_cultura
-- Resultados o informes de Pruebas Psicotécnicas. -> OUTPUT: 06_pruebas_psicotecnicas
-- Formato o informe de Verificación de Referencias. -> OUTPUT: 07_verificacion_referencias
-- Certificado de afiliación a ARL (Riesgos Laborales). -> OUTPUT: 08_arl
-- Certificado de afiliación a CCF (Caja de Compensación Familiar). -> OUTPUT: 09_ccf
-- Concepto de Examen Médico Ocupacional o de Ingreso. -> OUTPUT: 10_examen_medico_ingreso
-- Certificado de Antecedentes de la Policía Nacional. -> OUTPUT: 11_antecedente_policia
-- Certificado de Antecedentes de la Procuraduría General. -> OUTPUT: 12_antecedente_procuraduria
-- Certificado de Antecedentes Fiscales de la Contraloría. -> OUTPUT: 13_antecedente_contraloria
-- Certificación bancaria o soporte de Cuenta Bancaria para pago de nómina. -> OUTPUT: 14_cuenta_bancaria
-- Certificado de afiliación o historia de Pensiones (Protección, Porvenir, Colpensiones, etc.). -> OUTPUT: 15_pension
-- Certificado o constancia de afiliación a Cesantías. -> OUTPUT: 16_cesantias
-- Certificado de afiliación a EPS (Sura, Sanitas, Compensar, etc.) o ADRES. -> OUTPUT: 17_eps
-- Cartas o soportes generales de Referencias. -> OUTPUT: 18_referencias
-- Títulos de estudio, diplomas, actas de grado o certificados académicos (Colegios, Universidades, SENA, diplomados técnicos/profesionales). -> OUTPUT: 19_estudios
-- Carta de Referencia Personal o familiar. -> OUTPUT: 20_referencia_personal
-- Certificado Laboral o Referencia Laboral de empleos anteriores (Certificaciones de empresas sobre cargos y fechas). -> OUTPUT: 21_referencia_laboral
-- Hoja de Vida (HV) o Curriculum Vitae. -> OUTPUT: 22_hoja_de_vida
-- Formatos diligenciados para la contratación (autorizaciones, tratamiento de datos, listas de chequeo). -> OUTPUT: 23_formatos_para_la_contratacion
+{LISTA_CATEGORIAS_PROMPT}
 
 ### INSTRUCCIONES DE LECTURA Y PREVENCIÓN DE ERRORES:
 1. LEE DETENIDAMENTE el título principal, encabezados, logos y el texto del cuerpo del documento antes de clasificar.
 2. DISTINCIÓN CRÍTICA ENTRE "ESTUDIOS" Y "CURSOS CORPORATIVOS":
-   - Títulos universitarios, actas de grado, bachillerato, SENA o diplomados educativos van a "19_estudios".
-   - Certificados de capacitaciones empresariales, inducciones corporativas, cursos de ética, SAGRILAFT o transparencia NO son estudios formales; pertenecen a "03_curso_etica", "04_curso_transparencia" o "05_curso_cultura".
+   - Títulos universitarios, actas de grado, bachillerato, SENA o diplomados educativos van a "{CATEGORIAS['estudios']['rename']}".
+   - Certificados de capacitaciones empresariales, inducciones corporativas, cursos de ética, SAGRILAFT o transparencia NO son estudios formales; pertenecen a "{CATEGORIAS['curso_etica']['rename']}", "{CATEGORIAS['curso_transparencia']['rename']}" o "{CATEGORIAS['curso_cultura']['rename']}".
 3. No asumas la categoría basándote en la primera palabra que veas; analiza el propósito global del documento.
 
 ### REGLAS DE RESPUESTA (ESTRICTO):
-1. Si coincide claramente con alguna categoría, responde ÚNICAMENTE con la clave del OUTPUT (ejemplo: 01_documento_id).
+1. Si coincide claramente con alguna categoría, responde ÚNICAMENTE con la clave del OUTPUT (ejemplo: {CATEGORIAS['documento_id']['rename']}).
 2. Si el documento NO coincide con ninguna categoría o es totalmente ilegible, responde exactamente: NO_CLASIFICADO
 3. PROHIBIDO redactar explicaciones, justificaciones, saludos, comillas, saltos de línea o formato markdown. Devuelve SOLO la clave limpia.
 """
-
 
 """
 lista = [
@@ -217,6 +345,9 @@ formatos_para_la_contratacion = [
 
 
 """
+
+
+
 
 
 

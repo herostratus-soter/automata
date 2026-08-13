@@ -1,67 +1,41 @@
+import os
 import sys
+import json
 from pathlib import Path
-from google import genai
-from google.genai import types
 import docx
 import unicodedata
+from google import genai
+from google.genai import types
 
 # Configuración desde carpeta padre
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 import config
-from prompts_tmp import *
+from prompts_tmp import PROMPT_POR_NOMBRE, PROMPT_POR_CONTENIDO
+from tokens import tracker  # Importamos el rastreador centralizado
 
 FORMATOS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".heic", ".tif", ".tiff", ".docx"}
 
-# Lista oficial de respuestas válidas esperadas
-CLAVES_VALIDAS = {
+CLAVES_VALIDAS = [
     "01_documento_id", "02_contrato_laboral", "03_curso_etica", "04_curso_transparencia",
     "05_curso_cultura", "06_pruebas_psicotecnicas", "07_verificacion_referencias",
     "08_arl", "09_ccf", "10_examen_medico_ingreso", "11_antecedente_policia",
     "12_antecedente_procuraduria", "13_antecedente_contraloria", "14_cuenta_bancaria",
     "15_pension", "16_cesantias", "17_eps", "18_referencias", "19_estudios",
     "20_referencia_personal", "21_referencia_laboral", "22_hoja_de_vida",
-    "23_formatos_para_la_contratacion", "REVISAR_CONTENIDO", "NO_CLASIFICADO"
-}
+    "23_formatos_para_la_contratacion", "REVISAR_CONTENIDO"
+]
 
-class TokenTracker:
-    def __init__(self):
-        self.input_tokens = 0
-        self.output_tokens = 0
 
-    def sumar(self, usage_metadata):
-        """Acumula los tokens devueltos por la respuesta de Gemini."""
-        if usage_metadata:
-            self.input_tokens += getattr(usage_metadata, 'prompt_token_count', 0)
-            self.output_tokens += getattr(usage_metadata, 'candidates_token_count', 0)
+# --- UTILIDADES DE ARCHIVO Y TEXTO ---
 
-    def reporte_final(self):
-        """Muestra en consola el resumen detallado de consumo y costos."""
-        total = self.input_tokens + self.output_tokens
-        # Precios base aproximados de Gemini 2.5 Flash
-        costo_input = (self.input_tokens / 1_000_000) * 0.075
-        costo_output = (self.output_tokens / 1_000_000) * 0.30
-        costo_total = costo_input + costo_output
-
-        print("\n" + "=" * 55)
-        print("         RESUMEN DE CONSUMO DE TOKENS (GEMINI)")
-        print("=" * 55)
-        print(f" Tokens de Entrada (Input Prompt):   {self.input_tokens:>10,}")
-        print(f" Tokens de Salida  (Output Text):    {self.output_tokens:>10,}")
-        print("-" * 55)
-        print(f" TOTAL TOKENS CONSUMIDOS:            {total:>10,}")
-        print(f" Costo aproximado estimado:          ${costo_total:>10.6f} USD")
-        print("=" * 55 + "\n")
-
-# Instancia global que acumulará todo el proceso
-tracker = TokenTracker()
-
-def limpiar_texto(texto): # Quita tildes, caracteres especiales y espacios
+def limpiar_texto(texto: str) -> str:
     normalizado = unicodedata.normalize('NFD', texto)
     limpio = ''.join(c for c in normalizado if unicodedata.category(c) != 'Mn')
     limpio = ''.join(c for c in limpio if c.isalnum() or c in (' ', '_', '-')).strip()
     return limpio.replace(' ', '_')
 
-def sanear_archivos(directorio, tag="temp"): # Elimina caracteres raros del nombre
+
+def sanear_archivos(directorio: Path, tag="temp") -> list[Path]:
     print("--- FASE 1: Saneando nombres de archivo ---")
     archivos = []
     i = 1
@@ -80,20 +54,27 @@ def sanear_archivos(directorio, tag="temp"): # Elimina caracteres raros del nomb
 
     return archivos
 
-def leer_word(path): # Extrae texto plano de un .docx
+
+def leer_word(path: Path) -> str:
     doc = docx.Document(path)
     return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
 
-def peticion(contents, client):
+
+# --- CONSULTAS A LA IA (CON TRACKING DE TOKENS) ---
+
+def peticion(contents, client: genai.Client, es_json: bool = False) -> str:
     """
-    Función centralizada para realizar llamadas a la API de Gemini.
-    - Desactiva el thinking_budget para evitar respuestas parlanchinas.
-    - Suma automáticamente los tokens consumidos al tracker.
-    - Retorna el texto limpio de comillas y espacios.
+    Realiza la llamada a Gemini, desactiva el pensamiento innecesario,
+    registra los tokens consumidos y retorna la respuesta.
     """
-    config_gen = types.GenerateContentConfig(
-        thinking_config=types.ThinkingConfig(thinking_budget=0)
-    )
+    config_kwargs = {
+        "thinking_config": types.ThinkingConfig(thinking_budget=0)
+    }
+
+    if es_json:
+        config_kwargs["response_mime_type"] = "application/json"
+
+    config_gen = types.GenerateContentConfig(**config_kwargs)
 
     response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -101,28 +82,55 @@ def peticion(contents, client):
         config=config_gen
     )
 
-    # Registro centralizado de tokens
+    # Registro automático de tokens consumidos
     tracker.sumar(response.usage_metadata)
 
-    # Limpieza estricta del resultado
     return response.text.strip('\'" \n\r\t')
 
-def consultar_nombre(nombre_archivo, client): # Pasada 1: Clasificación por String
-    prompt = f"Nombre del archivo: {nombre_archivo}\n\n{PROMPT_POR_NOMBRE}"
 
-    # Llamada modularizada
-    res_limpia = peticion(prompt, client)
+def consultar_nombres_lote(archivos: list[Path], client: genai.Client) -> dict:
+    """
+    ULTRA-RÁPIDO: Clasifica TODOS los nombres de archivo en UNA SOLA llamada HTTP.
+    Retorna un diccionario: { "nombre_archivo.pdf": "categoria_asignada" }
+    """
+    lista_nombres = [a.name for a in archivos]
 
-    # Validación de seguridad
-    if res_limpia not in CLAVES_VALIDAS:
-        return "REVISAR_CONTENIDO"
+    prompt = f"""
+    Clasifica los siguientes nombres de archivo según el tipo de documento correspondiente.
 
-    return res_limpia
+    Lista de archivos a analizar:
+    {json.dumps(lista_nombres, ensure_ascii=False)}
 
-def consultar_contenido(archivo, client): # Pasada 2: OCR / Visión
+    Categorías válidas permitidas:
+    {json.dumps(CLAVES_VALIDAS, ensure_ascii=False)}
+
+    Regla: Si el nombre del archivo es ambiguo, no está claro o no coincide con precisión con una categoría, asigna "REVISAR_CONTENIDO".
+
+    Responde ÚNICAMENTE un JSON estructurado donde la clave sea el NOMBRE EXACTO del archivo y el valor sea la CATEGORÍA asignada.
+    Instrucciones adicionales de contexto: {PROMPT_POR_NOMBRE}
+    """
+
+    res_raw = peticion(prompt, client, es_json=True)
+
+    try:
+        resultado_json = json.loads(res_raw)
+        # Normalizar asegurando que cada archivo tenga una clave válida
+        clasificaciones = {}
+        for archivo in archivos:
+            cat = resultado_json.get(archivo.name, "REVISAR_CONTENIDO")
+            clasificaciones[archivo.name] = cat if cat in CLAVES_VALIDAS else "REVISAR_CONTENIDO"
+        return clasificaciones
+    except Exception:
+        # Fallback de seguridad en caso de error de parseo
+        return {archivo.name: "REVISAR_CONTENIDO" for archivo in archivos}
+
+
+def consultar_contenido(archivo: Path, client: genai.Client) -> str:
+    """
+    Evaluación individual por contenido (OCR / Visión / Texto Word) para archivos ambiguos.
+    """
     ext = archivo.suffix.lower()
 
-    # Preparación de contenidos según el tipo de archivo
     if ext == ".docx":
         texto = leer_word(archivo)
         contents = [f"Contenido Word:\n{texto}", PROMPT_POR_CONTENIDO]
@@ -131,32 +139,27 @@ def consultar_contenido(archivo, client): # Pasada 2: OCR / Visión
         remote = client.files.upload(file=archivo)
         contents = [remote, PROMPT_POR_CONTENIDO]
 
-    # Llamada modularizada
     res_limpia = peticion(contents, client)
 
-    # Limpieza del archivo remoto subido (si aplica)
     if remote:
         client.files.delete(name=remote.name)
 
-    # Validación de seguridad
-    if res_limpia not in CLAVES_VALIDAS:
+    if res_limpia not in CLAVES_VALIDAS and res_limpia != "NO_CLASIFICADO":
         return "NO_CLASIFICADO"
 
     return res_limpia
 
-def aplicar_nombre_final(archivo, clasificacion, index_indeterminado, conteo): # Asigna el nombre final
+
+# --- RENOMBRADO Y FLUJO PRINCIPAL ---
+
+def aplicar_nombre_final(archivo: Path, clasificacion: str, index_indeterminado: int, conteo: dict) -> Path:
     if clasificacion in ("REVISAR_CONTENIDO", "NO_CLASIFICADO"):
         nuevo_stem = f"00_indeterminado_{index_indeterminado:02d}"
     else:
         conteo[clasificacion] = conteo.get(clasificacion, 0) + 1
         cantidad = conteo[clasificacion]
+        nuevo_stem = clasificacion if cantidad == 1 else f"{clasificacion}_{cantidad}"
 
-        if cantidad == 1:
-            nuevo_stem = clasificacion
-        else:
-            nuevo_stem = f"{clasificacion}_{cantidad}"
-
-    # Protección de seguridad contra nombres demasiado largos en el SO
     if len(nuevo_stem) > 60:
         nuevo_stem = f"00_indeterminado_{index_indeterminado:02d}"
 
@@ -164,27 +167,43 @@ def aplicar_nombre_final(archivo, clasificacion, index_indeterminado, conteo): #
     print(f"  [Resultado Final] '{archivo.name}' -> '{nueva_ruta.name}'")
     return archivo.rename(nueva_ruta)
 
-def inspeccionar(directorio, client): # Coordina el flujo completo
+
+def inspeccionar(directorio: Path):
+    """
+    Función de entrada para el módulo inspector.
+    Crea internamente su cliente de Gemini usando config.apikey.
+    """
+    client = genai.Client(api_key=config.apikey)
     print(f"Directorio de trabajo: {directorio.resolve()}\n")
 
     conteo_categorias = {}
     archivos = sanear_archivos(directorio)
 
-    print("\n--- FASE 2: Clasificación por Nombre (Ahorro de Tokens) ---")
+    if not archivos:
+        print("No se encontraron archivos válidos para procesar.")
+        return
+
+    print("\n--- FASE 2: Clasificación por Nombre en Lote (Pasada 1 Ultra-rápida) ---")
+
+    # 1 sola llamada a la API para evaluar todos los nombres
+    clasificaciones = consultar_nombres_lote(archivos, client)
+
     pendientes = []
 
     for archivo in archivos:
-        resultado = consultar_nombre(archivo.name, client)
+        resultado = clasificaciones.get(archivo.name, "REVISAR_CONTENIDO")
 
         if resultado != "REVISAR_CONTENIDO":
             print(f"  [Por Nombre] '{archivo.name}' -> {resultado}")
             aplicar_nombre_final(archivo, resultado, 0, conteo_categorias)
         else:
-            print(f"  [Indeterminado por Nombre] '{archivo.name}' -> Requiere OCR/Contenido")
+            print(f"  [Indeterminado por Nombre] '{archivo.name}' -> Requiere 2da Pasada (OCR/Contenido)")
             pendientes.append(archivo)
 
+    # Reporte de necesidad de segunda pasada
     if pendientes:
-        print("\n--- FASE 3: Clasificación por Contenido (Archivos Ambiguos) ---")
+        print(f"\n[REPORTE ETAPAS] Se requiere 2da pasada por contenido para {len(pendientes)} archivo(s).")
+        print("--- FASE 3: Clasificación por Contenido (Pasada 2) ---")
         idx_indeterminado = 1
 
         for archivo in pendientes:
@@ -192,18 +211,10 @@ def inspeccionar(directorio, client): # Coordina el flujo completo
             print(f"  [Por Contenido] '{archivo.name}' -> {resultado}")
 
             aplicar_nombre_final(archivo, resultado, idx_indeterminado, conteo_categorias)
-            if resultado == "NO_CLASIFICADO":
+            if resultado in ("REVISAR_CONTENIDO", "NO_CLASIFICADO"):
                 idx_indeterminado += 1
     else:
-        print("\n¡Todos los archivos se clasificaron en la Fase 2! 0 tokens gastados en OCR.")
+        print("\n[REPORTE ETAPAS] ¡NO FUE NECESARIA LA 2da PASADA! Todos los archivos se clasificaron por nombre.")
 
-# Punto de entrada principal
-if __name__ == "__main__":
-    client = genai.Client(api_key=config.apikey)
-
-    # Ejecutamos el flujo de inspección
-    inspeccionar(Path(config.rutatemporal), client)
-    print("\nProceso finalizado con éxito.")
-
-    # Muestra el reporte financiero/técnico de tokens
+    # Muestra el informe financiero/técnico de consumo de tokens
     tracker.reporte_final()
