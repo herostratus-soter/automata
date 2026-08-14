@@ -1,31 +1,35 @@
 import sys
 from pathlib import Path
 
-# Agregar la carpeta padre al path de Python para importar config, tokens, etc.
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-# Importación de configuración y métricas
 import config
-from tokens import tracker
+from ai import reporte_tokens
 from identificador import identificar
 from inspector import inspeccionar
 
 
 def main():
-    # Configurar si se muestra el reporte de tokens en consola
-    tracker.mostrar_reporte = config.MOSTRAR_TOKENS
-
     ruta_trabajo = Path(config.RUTA_TEMPORAL)
 
-    # 1. Paso 1: Identificador
-    identificar(str(ruta_trabajo))
+    # 1. Identificador
+    inp_id, out_id = identificar(str(ruta_trabajo))
+    # print(reporte_tokens(inp_id, out_id, "Reporte Identificador"))
 
-    print("\n" + "="*50 + "\n")
+    print("\n" + "=" * 50 + "\n")
 
-    # 2. Paso 2: Inspector
-    inspeccionar(ruta_trabajo)
+    # 2. Inspector
+    inp_ins, out_ins = inspeccionar(ruta_trabajo)
+    # print(reporte_tokens(inp_ins, out_ins, "Reporte Inspector"))
 
     print("\nProceso de inspección finalizado con éxito.")
+
+    # 3. Consumo Total
+    if config.MOSTRAR_TOKENS:
+        inp_total = (inp_id + inp_ins)*1000
+        out_total = (out_id + out_ins)*1000
+        print(reporte_tokens(inp_total, out_total, "Consumo Total del Proceso"))
+
 
 if __name__ == "__main__":
     main()

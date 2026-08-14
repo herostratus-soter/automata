@@ -4,16 +4,10 @@ import json
 from pathlib import Path
 import docx
 import unicodedata
-from google import genai
-from google.genai import types
 
-# Configuración desde carpeta padre
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-import config
 from prompts_tmp import PROMPT_POR_NOMBRE, PROMPT_POR_CONTENIDO
-from tokens import tracker  # Importamos el rastreador centralizado
-
-MODEL_ID = config.MODELO_DEFAULT
+from ai import consultar_ai
 
 FORMATOS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".heic", ".tif", ".tiff", ".docx"}
 
@@ -28,16 +22,16 @@ CLAVES_VALIDAS = [
 ]
 
 
-# --- UTILIDADES DE ARCHIVO Y TEXTO ---
+# --- UTILIDADES ---
 
-def limpiar_texto(texto: str) -> str:
+def limpiar_texto(texto):
     normalizado = unicodedata.normalize('NFD', texto)
     limpio = ''.join(c for c in normalizado if unicodedata.category(c) != 'Mn')
     limpio = ''.join(c for c in limpio if c.isalnum() or c in (' ', '_', '-')).strip()
     return limpio.replace(' ', '_')
 
 
-def sanear_archivos(directorio: Path, tag="temp") -> list[Path]:
+def sanear_archivos(directorio, tag="temp"):
     print("--- FASE 1: Saneando nombres de archivo ---")
     archivos = []
     i = 1
@@ -57,44 +51,14 @@ def sanear_archivos(directorio: Path, tag="temp") -> list[Path]:
     return archivos
 
 
-def leer_word(path: Path) -> str:
+def leer_word(path):
     doc = docx.Document(path)
     return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
 
 
-# --- CONSULTAS A LA IA (CON TRACKING DE TOKENS) ---
+# --- CONSULTAS AI ---
 
-def peticion(contents, client: genai.Client, es_json: bool = False) -> str:
-    """
-    Realiza la llamada a Gemini, desactiva el pensamiento innecesario,
-    registra los tokens consumidos y retorna la respuesta.
-    """
-    config_kwargs = {
-        "thinking_config": types.ThinkingConfig(thinking_budget=0)
-    }
-
-    if es_json:
-        config_kwargs["response_mime_type"] = "application/json"
-
-    config_gen = types.GenerateContentConfig(**config_kwargs)
-
-    response = client.models.generate_content(
-        model=MODEL_ID,
-        contents=contents,
-        config=config_gen
-    )
-
-    # Registro automático de tokens consumidos
-    tracker.sumar(response.usage_metadata)
-
-    return response.text.strip('\'" \n\r\t')
-
-
-def consultar_nombres_lote(archivos: list[Path], client: genai.Client) -> dict:
-    """
-    ULTRA-RÁPIDO: Clasifica TODOS los nombres de archivo en UNA SOLA llamada HTTP.
-    Retorna un diccionario: { "nombre_archivo.pdf": "categoria_asignada" }
-    """
+def consultar_nombres_lote(archivos):
     lista_nombres = [a.name for a in archivos]
 
     prompt = f"""
@@ -112,49 +76,36 @@ def consultar_nombres_lote(archivos: list[Path], client: genai.Client) -> dict:
     Instrucciones adicionales de contexto: {PROMPT_POR_NOMBRE}
     """
 
-    res_raw = peticion(prompt, client, es_json=True)
+    res_raw, inp, out = consultar_ai(prompt, es_json=True)
+    resultado_json = json.loads(res_raw)
 
-    try:
-        resultado_json = json.loads(res_raw)
-        # Normalizar asegurando que cada archivo tenga una clave válida
-        clasificaciones = {}
-        for archivo in archivos:
-            cat = resultado_json.get(archivo.name, "REVISAR_CONTENIDO")
-            clasificaciones[archivo.name] = cat if cat in CLAVES_VALIDAS else "REVISAR_CONTENIDO"
-        return clasificaciones
-    except Exception:
-        # Fallback de seguridad en caso de error de parseo
-        return {archivo.name: "REVISAR_CONTENIDO" for archivo in archivos}
+    clasificaciones = {}
+    for archivo in archivos:
+        cat = resultado_json.get(archivo.name, "REVISAR_CONTENIDO")
+        clasificaciones[archivo.name] = cat if cat in CLAVES_VALIDAS else "REVISAR_CONTENIDO"
+
+    return clasificaciones, inp, out
 
 
-def consultar_contenido(archivo: Path, client: genai.Client) -> str:
-    """
-    Evaluación individual por contenido (OCR / Visión / Texto Word) para archivos ambiguos.
-    """
+def consultar_contenido(archivo):
     ext = archivo.suffix.lower()
 
     if ext == ".docx":
         texto = leer_word(archivo)
-        contents = [f"Contenido Word:\n{texto}", PROMPT_POR_CONTENIDO]
-        remote = None
+        prompt = f"Contenido Word:\n{texto}\n\n{PROMPT_POR_CONTENIDO}"
+        res, inp, out = consultar_ai(prompt)
     else:
-        remote = client.files.upload(file=archivo)
-        contents = [remote, PROMPT_POR_CONTENIDO]
+        res, inp, out = consultar_ai(PROMPT_POR_CONTENIDO, archivo_path=archivo)
 
-    res_limpia = peticion(contents, client)
+    if res not in CLAVES_VALIDAS and res != "NO_CLASIFICADO":
+        res = "NO_CLASIFICADO"
 
-    if remote:
-        client.files.delete(name=remote.name)
-
-    if res_limpia not in CLAVES_VALIDAS and res_limpia != "NO_CLASIFICADO":
-        return "NO_CLASIFICADO"
-
-    return res_limpia
+    return res, inp, out
 
 
 # --- RENOMBRADO Y FLUJO PRINCIPAL ---
 
-def aplicar_nombre_final(archivo: Path, clasificacion: str, index_indeterminado: int, conteo: dict) -> Path:
+def aplicar_nombre_final(archivo, clasificacion, index_indeterminado, conteo):
     if clasificacion in ("REVISAR_CONTENIDO", "NO_CLASIFICADO"):
         nuevo_stem = f"00_indeterminado_{index_indeterminado:02d}"
     else:
@@ -170,25 +121,23 @@ def aplicar_nombre_final(archivo: Path, clasificacion: str, index_indeterminado:
     return archivo.rename(nueva_ruta)
 
 
-def inspeccionar(directorio: Path):
-    """
-    Función de entrada para el módulo inspector.
-    Crea internamente su cliente de Gemini usando config.APIKEY.
-    """
-    client = genai.Client(api_key=config.APIKEY)
+def inspeccionar(directorio):
     print(f"Directorio de trabajo: {directorio.resolve()}\n")
 
+    total_inp = 0
+    total_out = 0
     conteo_categorias = {}
     archivos = sanear_archivos(directorio)
 
     if not archivos:
         print("No se encontraron archivos válidos para procesar.")
-        return
+        return [0, 0]
 
     print("\n--- FASE 2: Clasificación por Nombre en Lote (Pasada 1 Ultra-rápida) ---")
 
-    # 1 sola llamada a la API para evaluar todos los nombres
-    clasificaciones = consultar_nombres_lote(archivos, client)
+    clasificaciones, inp, out = consultar_nombres_lote(archivos)
+    total_inp += inp
+    total_out += out
 
     pendientes = []
 
@@ -202,14 +151,16 @@ def inspeccionar(directorio: Path):
             print(f"  [Indeterminado por Nombre] '{archivo.name}' -> Requiere 2da Pasada (OCR/Contenido)")
             pendientes.append(archivo)
 
-    # Reporte de necesidad de segunda pasada
     if pendientes:
         print(f"\n[REPORTE ETAPAS] Se requiere 2da pasada por contenido para {len(pendientes)} archivo(s).")
         print("--- FASE 3: Clasificación por Contenido (Pasada 2) ---")
         idx_indeterminado = 1
 
         for archivo in pendientes:
-            resultado = consultar_contenido(archivo, client)
+            resultado, inp, out = consultar_contenido(archivo)
+            total_inp += inp
+            total_out += out
+
             print(f"  [Por Contenido] '{archivo.name}' -> {resultado}")
 
             aplicar_nombre_final(archivo, resultado, idx_indeterminado, conteo_categorias)
@@ -218,5 +169,4 @@ def inspeccionar(directorio: Path):
     else:
         print("\n[REPORTE ETAPAS] ¡NO FUE NECESARIA LA 2da PASADA! Todos los archivos se clasificaron por nombre.")
 
-    # Muestra el informe financiero/técnico de consumo de tokens
-    tracker.reporte_final()
+    return [total_inp, total_out]
