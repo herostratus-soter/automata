@@ -13,6 +13,8 @@ import config
 from prompts_tmp import PROMPT_POR_NOMBRE, PROMPT_POR_CONTENIDO
 from tokens import tracker  # Importamos el rastreador centralizado
 
+MODEL_ID = config.MODELO_DEFAULT
+
 FORMATOS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".heic", ".tif", ".tiff", ".docx"}
 
 CLAVES_VALIDAS = [
@@ -77,7 +79,7 @@ def peticion(contents, client: genai.Client, es_json: bool = False) -> str:
     config_gen = types.GenerateContentConfig(**config_kwargs)
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=MODEL_ID,
         contents=contents,
         config=config_gen
     )
@@ -171,9 +173,9 @@ def aplicar_nombre_final(archivo: Path, clasificacion: str, index_indeterminado:
 def inspeccionar(directorio: Path):
     """
     Función de entrada para el módulo inspector.
-    Crea internamente su cliente de Gemini usando config.apikey.
+    Crea internamente su cliente de Gemini usando config.APIKEY.
     """
-    client = genai.Client(api_key=config.apikey)
+    client = genai.Client(api_key=config.APIKEY)
     print(f"Directorio de trabajo: {directorio.resolve()}\n")
 
     conteo_categorias = {}

@@ -10,11 +10,12 @@ from tokens import tracker
 from identificador import identificar
 from inspector import inspeccionar
 
+
 def main():
     # Configurar si se muestra el reporte de tokens en consola
-    tracker.mostrar_reporte = getattr(config, "mostrar_tokens", True)
+    tracker.mostrar_reporte = config.MOSTRAR_TOKENS
 
-    ruta_trabajo = Path(config.rutatemporal)
+    ruta_trabajo = Path(config.RUTA_TEMPORAL)
 
     # 1. Paso 1: Identificador
     identificar(str(ruta_trabajo))

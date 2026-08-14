@@ -11,7 +11,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import config
 from tokens import tracker
 
-MODEL_ID = "gemini-2.5-flash"
+MODEL_ID = config.MODELO_DEFAULT
 
 
 # --- 1. LLAMADA ULTRA-RÁPIDA (BATCH) EN UNA SOLA PETICIÓN ---
@@ -21,7 +21,7 @@ def analizar_carpeta_en_lote(nombre_carpeta: str, archivos: list) -> tuple[str, 
     Envía todos los nombres de una sola vez a Gemini para que determine
     la cédula por consenso y el nombre completo en UNA SOLA respuesta JSON.
     """
-    client = genai.Client(api_key=config.apikey)
+    client = genai.Client(api_key=config.APIKEY)
 
     prompt = f"""
     Analiza los siguientes nombres de archivos y carpeta perteneciente a un usuario.
@@ -37,7 +37,7 @@ def analizar_carpeta_en_lote(nombre_carpeta: str, archivos: list) -> tuple[str, 
     Responde ÚNICAMENTE en formato JSON con la siguiente estructura (sin bloques markdown ni explicaciones):
     {{
         "cedula": "dígitos_o_NINGUNO",
-        "nombre": "Nombre_Apellido_o_NINGUNO",
+        "nombre": "Apellido_Nombre_o_NINGUNO",
         "consenso_en_nombres": true_o_false
     }}
     """
