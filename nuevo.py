@@ -36,7 +36,9 @@ def ia_inspector(peticion):
     return [
         response.text,
         response.usage_metadata.prompt_token_count,
-        response.usage_metadata.candidates_token_count
+        response.usage_metadata.candidates_token_count,
+        response.usage_metadata.total_token_count,
+        response.usage_metadata.cached_content_token_count
         # RETORNAR COSTO
     ]
 
@@ -114,7 +116,7 @@ def get_id(directorio):
 def contar_tokens(respuestas):
     """suma los tokens de entrada y salida de las respuestas y actualiza las globales"""
 
-    global CONTEO_TOKENS_IN, CONTEO_TOKENS_OUT
+    global CONTEO_TOKENS_IN, CONTEO_TOKENS_OUT, CONTEO_TOKENS_ALL, CONTEO_TOKENS_CACHE
 
     token_dir_in = 0
     token_dir_out = 0
@@ -122,9 +124,13 @@ def contar_tokens(respuestas):
     for res in respuestas:
         token_dir_in += res[1]
         token_dir_out += res[2]
+        token_dir_all += res[3]
+        token_dir_cache += res[4]
 
     CONTEO_TOKENS_IN += token_dir_in
     CONTEO_TOKENS_OUT += token_dir_out
+    CONTEO_TOKENS_ALL += token_dir_all
+    CONTEO_TOKENS_CACHE += token_dir_cache
 
 
 def procesar_respuestas(datos, respuestas, ruta_salida="resultado.json"):
@@ -154,7 +160,7 @@ def operacion_dir(lista_carpetas):
         CONTEO_DIR += 1 #contar carpetas
 
         id_sujeto, sujeto, entidad = get_id(carpeta) #obtener el identificador del sujeto de la carpeta
-        prompt = sujeto + "\n" + PROMPT #incluye a la persona en el prompt
+        prompt = f"id: {id_sujeto} \n contratado: {sujeto}" + PROMPT #incluye a la persona en el prompt
 
         ruta_archivos = get_archivos(carpeta, FORMATOS)
         CONTEO_ARCHIVOS += len(ruta_archivos)
@@ -171,7 +177,7 @@ def operacion_dir(lista_carpetas):
         }
 
         nombre_json = f"{CONTEO_DIR}_{id_sujeto}_resultado.json"
-        respuestas = POOL.map(ia_inspector_tmp, peticiones) #operacion de la IA multihilo
+        respuestas = POOL.map(ia_inspector, peticiones) #operacion de la IA multihilo
         procesar_respuestas(datos, respuestas, RUTA_SALIDA / nombre_json)
         contar_tokens(respuestas)
 
@@ -181,14 +187,14 @@ def operacion_dir(lista_carpetas):
 
 #--------------------------CONFIG.PY----------------
 
-CONTEXTO = "Instrucciones fijas del sistema."
-PROMPT = "Extrae los datos en formato JSON según el esquema."
+CONTEXTO = "La salida de los prompts unicamente seran True o False."
+PROMPT = "examina el archivo y determina si corresponde al id del sujeto y su nombre."
 
 
 
 
 
-APIKEY = "ejemplo"
+APIKEY = "nada"
 MODELO = "gemini-2.5-flash-lite"
 
 DIR_PADRE = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/")
@@ -203,6 +209,10 @@ CLIENTE, CONFIG, MODELO = config_gemini(APIKEY, MODELO, CONTEXTO)
 
 CONTEO_TOKENS_IN = 0
 CONTEO_TOKENS_OUT = 0
+CONTEO_TOKENS_ALL = 0
+CONTEO_TOKENS_CACHE = 0
+
+
 CONTEO_ARCHIVOS = 0
 CONTEO_DIR = 0
 
@@ -215,10 +225,11 @@ POOL = ThreadPool(7)
 
 
 #----------------------------------EJECUCION-----------------------
+DIR_tmp = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1005189477 DUARTE ROJAS MARIAN ANDREA/")
 
-
-ruta_carpetas = []
-buscar_dir(DIR_PADRE,ruta_carpetas)
+#ruta_carpetas = []
+#buscar_dir(DIR_PADRE,ruta_carpetas)
+ruta_carpetas = [DIR_tmp]
 operacion_dir(ruta_carpetas)
 
 
@@ -229,32 +240,6 @@ print(f"cantidad carpetas : {CONTEO_DIR}")
 print(f"cantidad archivos : {CONTEO_ARCHIVOS}")
 print(f"total tokens input: {CONTEO_TOKENS_IN}")
 print(f"total tokens output: {CONTEO_TOKENS_OUT}")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
