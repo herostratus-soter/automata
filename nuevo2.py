@@ -309,7 +309,7 @@ NO uses como título valores que aparezcan dentro de tablas de datos, campos com
 Si no puedes identificar un título claro, responde: TITULO_NO_ENCONTRADO."""
 }
 
-APIKEY = "nada"
+APIKEY = null
 MODELO = "gemini-2.5-flash-lite"
 
 DIR_TMP = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1005189477 DUARTE ROJAS MARIAN ANDREA/")
