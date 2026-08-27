@@ -224,125 +224,111 @@ lista = [
     "14cuenta_bancaria",
     "15pension",
     "16cesantias",
-    "17eps";
+    "17eps",
     "18referencias",
     "19estudios",
     "20refencia_personal"
     "21referenca_laboral",
     "22hoja_de_vida",
     "23formatos_para_la_contratacion"
+    "24informe de datacredito"
+    "25informe de bases"
     ]
-
+    
+______________________________________________________________________
+______________________________________________________________________
+______________________________________________________________________    
+  
 01documento_id = [
-    "numero de documento",
-    "nombre completo",
     "tipo de documento"
     ]
 
 02contrato_laboral = [
-    "verificar que los datos de la persona contratada coincidan con los datos del candidato"
     "fecha de inicio de labores",
     "los espacios para firma del trabajador esten firmados por el candidato"
     ]
 
 03curso_etica = [
-    "verificar que los datos de la persona coincidan con los datos del candidato",
-    "nombre del curso"
     ]
 
 04curso_transparencia = [
-    "verificar que los datos de la persona coincidan con los datos del candidato",
-    "nombre del curso"
     ]
 
 05curso_cultura = [
-    "verificar que los datos de la persona coincidan con los datos del candidato",
-    "nombre del curso"
     ]
 
 06pruebas_psicotecnicas = [
-    "no es necesario abrir el documento, solo verificar que se encuentre entre los documentos"
     ]
 
 07verificacion_referencias = [
-    "verificar que los datos de la persona coincidan con los datos del candidato"
     ]
 
 08arl = [
-    "verificar que los datos de la persona coincidan con los datos del candidato"
     ]
 
 09ccf = [
-    "verificar que los datos de la persona coincidan con los datos del candidato"
     ]
 
 10examen_medico_ingreso = [
-    "verificar que los datos de la persona coincidan con los datos del candidato"
     ]
 
 11antecedente_policia = [
-    "verificar que los datos de la persona coincidan con los datos del candidato",
     "no tener antecedentes"
     ]
 
 12antecedente_procuraduria = [
-    "verificar que los datos de la persona coincidan con los datos del candidato",
     "no tener antecedentes"
     ]
 
 13antecedente_contraloria = [
-    "verificar que los datos de la persona coincidan con los datos del candidato",
     "no tener antecedentes"
     ]
 
 14cuenta_bancaria = [
-    "verificar que los datos de la persona coincidan con los datos del candidato",
     "numero de cuenta"
    ]
 
 15pension = [
-    "verificar que los datos de la persona coincidan con los datos del candidato",
-    "verificar que sea fondo de pensiones y/o de cesantias"
+    "verificar que sea fondo de pensiones o de pensiones y cesantías"
     ]
 
 16cesantias = [
-    "verificar que los datos de la persona coincidan con los datos del candidato",
-    "verificar que sea fondo de pensiones y/o de cesantias"
+    "verificar que sea fondo de cesantías o de pensiones y cesantías"
 
-17eps = [
-    "verificar que los datos de la persona coincidan con los datos del candidato"
+17epsoadress= [
+    ]
+18 estudios = [
+    "que sean de bachillerato"
+    ]
+19refencia_personal = [
+    "fecha",
+    "firma"
+    ]
+ 
+20refencia_laboral = [
     ]
 
-18referencias = [
-    "verificar que los datos de la persona coincidan con los datos del candidato"
+21hoja_de_vida = [
     ]
 
-19estudios = [
-    "verificar que los datos de la persona coincidan con los datos del candidato",
-    "verificar que el estudio sea de bachillerato"
-    ]
-
-20refencia_personal = [
-    "verificar que la fecha sea reciente con relacion al contrato",
-    "verificar que este firmada por quien hace la referencia"
-    ]
-
-21referenca_laboral = [
-    "corroborar que se indique que el candidato labor[o o prest[o sus servicios en la empresa que hace la referencia",
-    "verificar que este firmada"
-    ]
-
-22hoja_de_vida = [
-    "verificar que los datos de la persona coincidan con los datos del candidato"
-    ]
-
-formatos_para_la_contratacion = [
+22formatos_para_la_contratacion = [
     "verificar que minimo sean 9 hojas",
     "verificar que las 9 hojas esten diligenciadas y firmadas por el candidato cuando corresponda"
     ]
+23informe_datacredito = [
+    "verificar si la persona tiene moras",
+    "verificar si la persona tiene demandas"
+    ]
+24informe_bases = [
+    "verificar si la persona tiene algún inconveniente que le impida ser contratado"
+    ]
+25visita_domiciliaria = [
+    ]
+26acuerdo_de_pago = [
+    ]
+27compilado
 
-
-
+28otros
 
 """
 

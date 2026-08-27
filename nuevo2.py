@@ -285,9 +285,11 @@ PROMPT = """Examina el archivo con OCR exhaustivo. Clasifica el documento según
 
 Reglas de clasificación (revisa en este orden):
 
-1. 01_CEDULA: el archivo es una foto o escaneo del documento de identidad (cédula) de la persona, por delante y/o detrás, con foto del rostro. Es el documento físico en sí, no una mención de él.
+1. 01_DOCUMENTOID: el archivo es una foto o escaneo del documento de identidad sea una cédula o un ppt(permiso de protección temporal) de la persona, por delante y/o detrás, con foto del rostro. Es el documento físico en sí, no una mención de él.
 
-2. 02_EPS: el documento certifica, confirma o reporta la afiliación de una persona a una EPS (Entidad Promotora de Salud), sin importar si es un carné físico, una carta de una EPS, o un certificado/constancia de afiliación. Ejemplos de encabezados típicos: "Certificado de Afiliación", "Constancia de Afiliación EPS", cartas emitidas por una EPS confirmando régimen contributivo/subsidiado. Identifica esto por el CONTENIDO (habla de afiliación, régimen, cotizante, EPS) no solo por si menciona una cédula.
+2. 02_CONTRATO_LABORAL: Documento legal que formaliza la relación bilateral entre un empleador y un empleado, detallando cargos, funciones, salario, horario, tipo de contrato y fecha de inicio. Se identifica por contener cláusulas de índole laboral, condiciones de prestación del servicio, remuneración, obligaciones legales y las firmas de ambas partes.
+
+2. 02_EPS_O_ADRES: Certifica la afiliación a una EPS o registra el estado en el sistema ADRES (Fosyga). Contiene datos de régimen contributivo o subsidiado, cotizante o beneficiario, estado activo y EPS correspondiente. Se identifica por su contenido sobre afiliación a salud, EPS o validación en bases de datos oficiales.
 
 3. 03_OTRO: cualquier documento que no encaje en las dos categorías anteriores, incluyendo certificados de otras entidades (Contraloría, Procuraduría, cámaras de comercio, certificados laborales, etc.) aunque mencionen el número o tipo de cédula de una persona dentro del texto.
 
@@ -309,7 +311,7 @@ NO uses como título valores que aparezcan dentro de tablas de datos, campos com
 Si no puedes identificar un título claro, responde: TITULO_NO_ENCONTRADO."""
 }
 
-APIKEY = null
+APIKEY = "ejemplo"
 MODELO = "gemini-2.5-flash-lite"
 
 DIR_TMP = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1005189477 DUARTE ROJAS MARIAN ANDREA/")
