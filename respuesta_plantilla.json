@@ -1,0 +1,12 @@
+{
+  "id_documento": <id_documento>,
+  "tipo_documento": <tipo_documento>,
+  "verificacion_identidad": <"SI" | "NO" | "SIN_DATOS">,
+  "verificacion_nombre": <"SI" | "NO">,
+  "requerimientos": {
+    "req1": <output1 si aplica requisito1, si no null>,
+    "req2": <output2 si aplica requisito2, si no null>,
+    "req3": <output3 si aplica requisito3, si no null>,
+    "req4": <output4 si aplica requisito4, si no null>
+  }
+}

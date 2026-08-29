@@ -4,11 +4,13 @@ from google import genai # ia
 from pathlib import Path #libreria para navegar y procesar rutas
 from multiprocessing.dummy import Pool as ThreadPool #multihilo
 
+import json
+import pandas as pd
 
 #--------------------funciones ia----------------------------
 
 
-def config_gemini(apikey, modelo, contexto):
+def config_gemini(apikey, modelo, contexto, schema):
     """configuracion de gemini que se llama solo una vez y
     entrega variables globales para usar en las llamadas de ia"""
 
@@ -16,9 +18,30 @@ def config_gemini(apikey, modelo, contexto):
     config = {
         "system_instruction": contexto,
         "temperature": 0.0,
-        #"response_mime_type": "application/json",
+        "response_mime_type": "application/json",
+        "response_schema": schema,
         }
     return client, config, modelo
+
+
+def esquemaods(ruta_ods, hoja="Hoja 1"):
+    """crea el schema para la configuracion de gemini"""
+
+
+    df = pd.read_excel(ruta_ods, engine="odf", sheet_name=hoja)
+    req = {f"req{i}": genai.types.Schema(type="STRING", nullable=True) for i in range(1, 5)}
+    return genai.types.Schema(
+        type="OBJECT",
+        properties={
+            "id_documento": genai.types.Schema(type="INTEGER", enum=[str(i) for i in df["id"]]),
+            "tipo_documento": genai.types.Schema(type="STRING", enum=list(df["documento"])),
+            "verificacion_identidad": genai.types.Schema(type="STRING", enum=["SI", "NO", "SIN_DATOS"]),
+            "verificacion_nombre": genai.types.Schema(type="STRING", enum=["SI", "NO"]),
+            "razon_clasificacion": genai.types.Schema(type="STRING"),
+            "requerimientos": genai.types.Schema(type="OBJECT", properties=req, required=list(req)),
+        },
+        required=["id_documento", "tipo_documento", "verificacion_identidad", "verificacion_nombre", "razon_clasificacion", "requerimientos"],
+    )
 
 
 def ia_inspector(archivo_nube, prompt):
@@ -40,6 +63,7 @@ def ia_inspector(archivo_nube, prompt):
         response.usage_metadata.total_token_count,
         (response.usage_metadata.cached_content_token_count or 0)
         ]
+
 
 #------------------- rutas y archivos ---------------------------
 
@@ -132,20 +156,19 @@ def get_archivos(directorio, formatos):
 #----------------------------operaciones-------------------------------------
 
 
-def ia_inspector_tmp(peticion):
-    ruta_archivo = peticion[0]
+def reglasods(ruta_ods, hoja="Hoja 1"):
+    """lee la hoja de calculo .ODS con las reglas (reglas.ods) para el contexto de la IA"""
 
-    # Extraemos solo el nombre del archivo para identificarlo en la prueba
-    nombre_archivo = Path(ruta_archivo).name
-
-    # Generamos un JSON falso que simula la respuesta de la IA para ese archivo
-    json_falso = f'{{"archivo_procesado": "{nombre_archivo}", "estado": "ok", "analisis": "prueba exitosa"}}'
-
-    # Simulamos el conteo de tokens: 150 de entrada, 50 de salida
-    tokens_in = 150
-    tokens_out = 50
-
-    return [json_falso, tokens_in, tokens_out]
+    df = pd.read_excel(ruta_ods, engine="odf", sheet_name=hoja)
+    bloques = []
+    for _, fila in df.iterrows():
+        bloque = f'id_documento {fila["id"]} — tipo_documento: "{fila["documento"]}"\nDescripción: {fila["descripcion"]}'
+        for i in range(1, 5):
+            requisito, output = fila.get(f"requisito{i}"), fila.get(f"output{i}")
+            if pd.notna(requisito):
+                bloque += f"\nreq{i}: {requisito} -> formato esperado: {output}"
+        bloques.append(bloque)
+    return "\n\n".join(bloques)
 
 
 def get_id(directorio):
@@ -200,44 +223,50 @@ def procesar_respuestas(datos, respuestas, ruta_salida="resultado.json"):
 
 
 
-
 def ciclo_archivo(peticion_archivo):
-    """Gestiona la carga, hace peticiones en cascada y elimina el archivo."""
+    """
+    Procesa un solo archivo de principio a fin:
+    1. Lo sube a Gemini.
+    2. Le hace la única petición de clasificación + verificación.
+    3. Elimina el archivo remoto (ya no se necesita en la nube de Gemini).
+    4. Renombra el PDF original en disco para que refleje la categoría detectada.
+    5. Guarda el resultado como JSON individual en OUTPUT_JSON.
 
+    peticion_archivo: tupla (ruta_archivo, datos_sujeto)
+    devuelve: [resultado_dict, tokens_in, tokens_out, tokens_total, tokens_cache]
+    """
     ruta_archivo, datos_sujeto = peticion_archivo
+
+    # --- 1. Subida y consulta a la IA ---
     archivo_nube = CLIENTE.files.upload(file=ruta_archivo)
+    prompt = f"id: {datos_sujeto['id']}\nsujeto: {datos_sujeto['sujeto']}"
+    respuesta = ia_inspector(archivo_nube, prompt)
 
-    print(ruta_archivo.name)
-    print(ruta_archivo.name)
-    # Corrección 2: Usar comillas simples dentro del diccionario en el f-string
-    prompt_1 = f"id: {datos_sujeto['id']}\n" + PROMPT
-    print("prompt_1: ",prompt_1)
-    peticion_1 = ia_inspector(archivo_nube, prompt_1)
-
-    # Corrección 3: Limpiar corchetes sobrantes
-    archivo_tipo = peticion_1[0].strip()
-    prompt_2_texto = DIC_PROMPTS.get(archivo_tipo, DIC_PROMPTS['03_OTRO'])
-    prompt_2 = f"id: {datos_sujeto['id']}\n" + prompt_2_texto
-
-    print("prompt_2: ",prompt_2)
-    peticion_2 = ia_inspector(archivo_nube, prompt_2)
-
-    print("peticion 1")
-    print("res: ",peticion_1[0])
-    print("tk in: ",peticion_1[1])
-    print("tk out: ",peticion_1[2])
-    print("tk all: ",peticion_1[3])
-    print("tk cache: ",peticion_1[4])
-    print("peticion 2")
-    print("res: ",peticion_2[0])
-    print("tk in: ",peticion_2[1])
-    print("tk out: ",peticion_2[2])
-    print("tk all: ",peticion_2[3])
-    print("tk cache: ",peticion_2[4])
-    # Aquí armarías lo que vas a retornar basado en peticion_1 y peticion_2
+    # Ya tenemos la respuesta, no hace falta mantener el archivo en la nube de Gemini
     CLIENTE.files.delete(name=archivo_nube.name)
-    return peticion_2
 
+    # --- 2. Parseo de la respuesta ---
+    resultado = json.loads(respuesta[0])
+
+    # --- 3. Renombrar el documento original en disco ---
+    # Nuevo nombre: <id_documento detectado>_<nombre original saneado><extensión original>
+    nombre_limpio = limpiar_texto(ruta_archivo.stem)
+    nueva_ruta_archivo = ruta_archivo.parent / f"{resultado['id_documento']}_{resultado['tipo_documento']}_{nombre_limpio}{ruta_archivo.suffix}"
+    ruta_archivo.rename(nueva_ruta_archivo)
+
+    # La ruta que guardamos en el resultado ya debe apuntar al archivo con su nombre nuevo
+    resultado["ruta"] = str(nueva_ruta_archivo)
+
+    # --- 4. Guardado del JSON individual (nombre igual que antes, sin tocar) ---
+    nombre_json = f"{datos_sujeto['id']}_{resultado['id_documento']}_{nombre_limpio}.json"
+    ruta_salida = OUTPUT_JSON / nombre_json
+    ruta_salida.write_text(
+        json.dumps(resultado, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+    # contar_tokens() espera esta forma: [resultado, tokens_in, tokens_out, tokens_all, tokens_cache]
+    return [resultado] + respuesta[1:]
 
 
 def operacion_dir(lista_carpetas):
@@ -279,58 +308,24 @@ def operacion_dir(lista_carpetas):
 
 #--------------------------CONFIG.PY----------------
 
-CONTEXTO = "identificador y examinador de archivos determinista. La salida de los prompts unicamente seran texto explicito, nada de saludos ni exageracion. debes examinar con el OCR exhaustivamente los documentos sin importar el nombre de estos. unicamente importa el contenido."
+APIKEY = "nothing"
+#MODELO = "gemini-2.5-flash-lite"
+MODELO = "gemini-3.1-flash-lite"
+#MODELO = "gemini-2.5-flash"
 
-PROMPT = """Examina el archivo con OCR exhaustivo. Clasifica el documento según su PROPÓSITO/CONTENIDO PRINCIPAL, sin importar el formato (carné, carta, certificado, constancia).
 
-Reglas de clasificación (revisa en este orden):
-
-1. 01_DOCUMENTOID: el archivo es una foto o escaneo del documento de identidad sea una cédula o un ppt(permiso de protección temporal) de la persona, por delante y/o detrás, con foto del rostro. Es el documento físico en sí, no una mención de él.
-
-2. 02_CONTRATO_LABORAL: Documento legal que formaliza la relación bilateral entre un empleador y un empleado, detallando cargos, funciones, salario, horario, tipo de contrato y fecha de inicio. Se identifica por contener cláusulas de índole laboral, condiciones de prestación del servicio, remuneración, obligaciones legales y las firmas de ambas partes.
-
-2. 02_EPS_O_ADRES: Certifica la afiliación a una EPS o registra el estado en el sistema ADRES (Fosyga). Contiene datos de régimen contributivo o subsidiado, cotizante o beneficiario, estado activo y EPS correspondiente. Se identifica por su contenido sobre afiliación a salud, EPS o validación en bases de datos oficiales.
-
-3. 03_OTRO: cualquier documento que no encaje en las dos categorías anteriores, incluyendo certificados de otras entidades (Contraloría, Procuraduría, cámaras de comercio, certificados laborales, etc.) aunque mencionen el número o tipo de cédula de una persona dentro del texto.
-
-IMPORTANTE: no clasifiques por el tipo de emisor (si es "una carta" o "un certificado") sino por el TEMA del documento. Una carta de una EPS sobre afiliación es 01_EPS, no 03_OTRO.
-
-Responde únicamente con una de estas tres palabras exactas: 01_CEDULA, 01_EPS, 03_OTRO. Sin explicaciones, sin saludos, sin texto adicional."""
-
-DIC_PROMPTS = {
-    '01_CEDULA': "devuelve la palabra: soy una cedula + la fecha de expedicion en formato aaaammdd. Si no encuentras explícitamente escrita la fecha de expedición en el documento, responde exactamente: FECHA_NO_ENCONTRADA. No inventes ni calcules la fecha a partir de otros datos como códigos de verificación.",
-
-    '02_EPS': "devuelve el nombre de la EPS en mayúsculas, seguido de un guion y el Estado_Actual o Estado_Afiliación si aparece en el documento (ej: VIGENTE, CANCELADA). Si no encuentras el nombre de la EPS, responde: EPS_NO_ENCONTRADA.",
-
-    '03_OTRO': """devuelve la palabra: otro + el título real del documento.
-
-El título es el encabezado principal o el nombre del trámite/certificado que aparece normalmente en la parte superior del documento (ej: 'CERTIFICADO DE ANTECEDENTES FISCALES', 'CONSTANCIA DE AFILIACIÓN', 'CARTA LABORAL').
-
-NO uses como título valores que aparezcan dentro de tablas de datos, campos como 'Tipo Documento', 'Nombre', 'Identificación' ni ningún dato personal del sujeto. Ignora esos campos aunque contengan palabras como 'cédula' o 'ciudadanía'.
-
-Si no puedes identificar un título claro, responde: TITULO_NO_ENCONTRADO."""
-}
-
-APIKEY = "ejemplo"
-MODELO = "gemini-2.5-flash-lite"
-
-DIR_TMP = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1005189477 DUARTE ROJAS MARIAN ANDREA/")
+DIR_TMP = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1048325323   GONZALEZ FONSECA CARMEN CRISTINA/")
 DIR_PADRE = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/")
 RUTA_SALIDA = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/automata/tmp/")
-
-
+OUTPUT_JSON = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/automata/tmp/")
+OUTPUT_JSON.mkdir(parents=True, exist_ok=True)
 
 FORMATOS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".heic", ".tif", ".tiff", ".docx"}
-
-CLIENTE, CONFIG, MODELO = config_gemini(APIKEY, MODELO, CONTEXTO)
-
 
 CONTEO_TOKENS_IN = 0
 CONTEO_TOKENS_OUT = 0
 CONTEO_TOKENS_ALL = 0
 CONTEO_TOKENS_CACHE = 0
-
-
 CONTEO_ARCHIVOS = 0
 CONTEO_DIR = 0
 
@@ -338,6 +333,37 @@ POOL = ThreadPool(7)
 
 
 #----------------------------------EJECUCION-----------------------
+
+CONTEXTO_BASE = """Eres un identificador y examinador de documentos determinista. Examina cada archivo con OCR exhaustivo, sin importar el nombre del archivo, únicamente el contenido.
+
+CLASIFICACIÓN: asigna el documento a uno de los tipos del catálogo siguiente, según su PROPÓSITO/CONTENIDO PRINCIPAL, no según su formato (carné, carta, certificado, constancia). Si no encaja claramente en ninguno, usa "otros".
+"otros" es una respuesta válida y esperada, no un último recurso. Úsala con la misma comodidad que cualquier otra categoría del catálogo. Clasifica en una categoría específica solo si el documento cumple sus características centrales, no solo si comparte alguna palabra, tema, o mención superficial con ella. Ante duda razonable entre una categoría específica y "otros", responde "otros".
+
+VERIFICACIÓN DE IDENTIDAD (número de identificación), reglas en este orden:
+1. Si el documento no contiene ningún número de identificación de persona natural -> SIN_DATOS.
+2. Si contiene un número de identificación y coincide exactamente con el id del sujeto entregado en la petición -> SI.
+3. Si contiene un número de identificación distinto al del sujeto -> NO.
+
+VERIFICACIÓN DE NOMBRE, reglas en este orden:
+1. Si el documento no menciona ningún nombre de persona -> NO.
+2. Considera que el nombre coincide (SI) si contiene las mismas palabras que el nombre del sujeto, sin importar el orden, mayúsculas/minúsculas, tildes, o si falta/sobra un segundo nombre o apellido.
+3. Si el nombre encontrado comparte como máximo un apellido o nombre en común con el del sujeto -> NO.
+
+Responde únicamente con la estructura de salida indicada, sin saludos ni texto adicional.
+
+Además, incluye "razon_clasificacion": una explicación breve (máximo 15 palabras) de por qué elegiste ese tipo de documento y no otro parecido.
+
+Catálogo de tipos de documento:
+"""
+
+RUTA_ODS = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/reglas.ods")
+
+FINALCONTEXT = CONTEXTO_BASE + reglasods(RUTA_ODS)
+print(FINALCONTEXT)
+SCHEMA = esquemaods(RUTA_ODS)
+
+CLIENTE, CONFIG, MODELO = config_gemini(APIKEY, MODELO, FINALCONTEXT, SCHEMA)
+
 
 
 carpeta = DIR_TMP
@@ -359,22 +385,22 @@ desbloquear_pdfs(carpeta, clave=id_sujeto) # 2. Desbloquea PDFs usando id_sujeto
 
 ruta_archivos = get_archivos(carpeta, FORMATOS)
 CONTEO_ARCHIVOS += len(ruta_archivos)
+
+cont = 0
 for ruta in ruta_archivos:
-    print(ruta.name)
 
+    print(cont,"---",ruta.name)
+    cont += 1
 
-peticion_archivo = [(ruta_archivos[17],datos)] # creacion de lista pora que las peticioens sean (archivo + prompt)
+peticion_archivo = [(ruta, datos) for ruta in ruta_archivos]
 
-nombre_json = f"{CONTEO_DIR}_{id_sujeto}_resultado.json"
+#peticion_archivo = [(ruta_archivos[9], datos)]
 
-respuestas = []
-for peticion in peticion_archivo:
-    out = ciclo_archivo(peticion)
-    respuestas.append(out)
+respuestas = POOL.map(ciclo_archivo, peticion_archivo)
+POOL.close()
+POOL.join()
 
-procesar_respuestas(datos, respuestas, RUTA_SALIDA / nombre_json)
 contar_tokens(respuestas)
-
 
 
 
@@ -394,3 +420,5 @@ print(f"cantidad archivos : {CONTEO_ARCHIVOS}")
 print(f"total tokens input: {CONTEO_TOKENS_IN}")
 print(f"total tokens output: {CONTEO_TOKENS_OUT}")
 print(f"total tokens total: {CONTEO_TOKENS_ALL}")
+
+

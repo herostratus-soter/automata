@@ -1,0 +1,14 @@
+{
+  "id_documento": 7,
+  "tipo_documento": "ccf",
+  "verificacion_identidad": "SI",
+  "verificacion_nombre": "SI",
+  "razon_clasificacion": "Certificado de afiliación emitido por la Caja de Compensación Familiar Comfacesar.",
+  "requerimientos": {
+    "req1": null,
+    "req2": null,
+    "req3": null,
+    "req4": null
+  },
+  "ruta": "/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1048325323   GONZALEZ FONSECA CARMEN CRISTINA/7_ccf_7_ccf_CCF1048325323.pdf"
+}

@@ -1,0 +1,14 @@
+{
+  "id_documento": 12,
+  "tipo_documento": "cuenta_bancaria",
+  "verificacion_identidad": "SI",
+  "verificacion_nombre": "SI",
+  "razon_clasificacion": "Es una certificación bancaria que detalla productos financieros y número de cuenta.",
+  "requerimientos": {
+    "req1": "657319844",
+    "req2": null,
+    "req3": null,
+    "req4": null
+  },
+  "ruta": "/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1048325323   GONZALEZ FONSECA CARMEN CRISTINA/12_cuenta_bancaria_12_cuenta_bancaria_T26_Referencia_Bancaria_1048325323.pdf"
+}

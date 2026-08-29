@@ -1,0 +1,14 @@
+{
+  "id_documento": 8,
+  "tipo_documento": "examen_medico_ingreso",
+  "verificacion_identidad": "SI",
+  "verificacion_nombre": "SI",
+  "razon_clasificacion": "Es un certificado de examen médico ocupacional de preingreso con concepto de aptitud.",
+  "requerimientos": {
+    "req1": null,
+    "req2": null,
+    "req3": null,
+    "req4": null
+  },
+  "ruta": "/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1048325323   GONZALEZ FONSECA CARMEN CRISTINA/8_examen_medico_ingreso_8_examen_medico_ingreso_Certificado_medico_CARMEN_CRISTINA_GONZALEZ_FONSECA.pdf"
+}
