@@ -9,22 +9,27 @@ import pandas as pd
 
 #--------------------funciones ia----------------------------
 
+def schema_segmentador():
+    """schema para la segunda pasada: identifica los documentos distintos dentro de un compilado"""
 
-def config_gemini(apikey, modelo, contexto, schema):
-    """configuracion de gemini que se llama solo una vez y
-    entrega variables globales para usar en las llamadas de ia"""
+    segmento = genai.types.Schema(
+        type="OBJECT",
+        properties={
+            "pagina_inicio": genai.types.Schema(type="INTEGER"),
+            "pagina_fin": genai.types.Schema(type="INTEGER"),
+        },
+        required=["pagina_inicio", "pagina_fin"],
+    )
+    return genai.types.Schema(
+        type="OBJECT",
+        properties={
+            "segmentos": genai.types.Schema(type="ARRAY", items=segmento),
+        },
+        required=["segmentos"],
+    )
 
-    client = genai.Client(api_key=apikey)
-    config = {
-        "system_instruction": contexto,
-        "temperature": 0.0,
-        "response_mime_type": "application/json",
-        "response_schema": schema,
-        }
-    return client, config, modelo
 
-
-def esquemaods(ruta_ods, hoja="Hoja 1"):
+def schema_verificador(ruta_ods, hoja="Hoja 1"):
     """crea el schema para la configuracion de gemini"""
 
 
@@ -44,16 +49,24 @@ def esquemaods(ruta_ods, hoja="Hoja 1"):
     )
 
 
-def ia_inspector(archivo_nube, prompt):
+def ia_inspector(archivo_nube, prompt, contexto, schema, modelo):
     """
     Función pura: consulta con la IA gemini.
     Recibe una petición armada (ej. [archivo_subido, prompt])
     y devuelve el texto y los tokens.
     """
+
+    config = {
+        "system_instruction": contexto,
+        "temperature": 0.0,
+        "response_mime_type": "application/json",
+        "response_schema": schema,
+        }
+
     response = CLIENTE.models.generate_content(
-        model = MODELO,
+        model = modelo,
         contents = [archivo_nube, prompt],
-        config = CONFIG
+        config = config
         )
 
     return [
@@ -63,6 +76,30 @@ def ia_inspector(archivo_nube, prompt):
         response.usage_metadata.total_token_count,
         (response.usage_metadata.cached_content_token_count or 0)
         ]
+
+
+def contar_tokens(respuestas):
+    """suma los tokens de entrada y salida de las respuestas y actualiza las globales"""
+
+    global CONTEO_TOKENS_IN, CONTEO_TOKENS_OUT, CONTEO_TOKENS_ALL, CONTEO_TOKENS_CACHE
+
+    token_dir_in = 0
+    token_dir_out = 0
+    token_dir_all = 0
+    token_dir_cache = 0
+
+    for res in respuestas:
+        token_dir_in += res[1]
+        token_dir_out += res[2]
+        token_dir_all += res[3]
+        token_dir_cache += (res[4] or 0)
+
+    CONTEO_TOKENS_IN += token_dir_in
+    CONTEO_TOKENS_OUT += token_dir_out
+    CONTEO_TOKENS_ALL += token_dir_all
+    CONTEO_TOKENS_CACHE += token_dir_cache
+
+    return token_dir_in, token_dir_out, token_dir_all, token_dir_cache
 
 
 #------------------- rutas y archivos ---------------------------
@@ -90,29 +127,6 @@ def buscar_dir(directorio, lista_resultados):
             buscar_dir(elemento, lista_resultados) #continua la busqueda
 
 
-def limpiar_texto(texto):
-    """quita tildes, caracteres especiales y reemplaza espacios por guiones bajos"""
-
-    normalizado = unicodedata.normalize('NFD', texto)
-    limpio = ''.join(c for c in normalizado if unicodedata.category(c) != 'Mn')
-    limpio = ''.join(c for c in limpio if c.isalnum() or c in (' ', '_', '-')).strip()
-    return limpio.replace(' ', '_')
-
-
-def sanear_carpeta(directorio):
-    """renombra todos los archivos de la carpeta quitando tildes y caracteres especiales"""
-
-    directorio_path = Path(directorio)
-    for elemento in directorio_path.iterdir():
-        if elemento.is_file() and elemento.suffix.lower() in FORMATOS:
-            nombre_limpio = limpiar_texto(elemento.stem)
-            nuevo_nombre = f"{nombre_limpio}{elemento.suffix.lower()}"
-            nueva_ruta = elemento.parent / nuevo_nombre
-
-            if elemento != nueva_ruta:
-                elemento.rename(nueva_ruta)
-
-
 def desbloquear_pdfs(directorio, clave):
     """revisa si los pdfs de la carpeta estan encriptados y los desbloquea usando la clave"""
 
@@ -136,19 +150,24 @@ def desbloquear_pdfs(directorio, clave):
 
 
 def get_archivos(directorio, formatos):
-    """toma un directorio y extrae una lista con la ruta de los archivos con formato valido"""
+    """toma un directorio, renombra cada archivo válido como tmp<index><extensión>,
+    y devuelve la lista con las rutas ya renombradas"""
 
     ruta_archivos = []
     directorio_path = Path(directorio)
     elementos = list(directorio_path.iterdir()) # obtiene todo lo que hay en el directorio
 
+    index = 0
     for elemento in elementos:
         if elemento.is_file():# Filtra que sea un archivo y no una carpeta que termine en esa extensión
             extension = elemento.suffix.lower() # obtiene sufijo
 
             if extension in formatos: # filtra por formato
-                ruta_absoluta = elemento.resolve()
-                ruta_archivos.append(ruta_absoluta) # guarda ruta absoluta
+                nueva_ruta = elemento.parent / f"tmp{index}{extension}"
+                elemento.rename(nueva_ruta)
+                index += 1
+
+                ruta_archivos.append(nueva_ruta.resolve()) # guarda ruta absoluta ya renombrada
 
     return ruta_archivos
 
@@ -156,7 +175,7 @@ def get_archivos(directorio, formatos):
 #----------------------------operaciones-------------------------------------
 
 
-def reglasods(ruta_ods, hoja="Hoja 1"):
+def ods_string(ruta_ods, hoja="Hoja 1"):
     """lee la hoja de calculo .ODS con las reglas (reglas.ods) para el contexto de la IA"""
 
     df = pd.read_excel(ruta_ods, engine="odf", sheet_name=hoja)
@@ -171,7 +190,7 @@ def reglasods(ruta_ods, hoja="Hoja 1"):
     return "\n\n".join(bloques)
 
 
-def get_id(directorio):
+def obtener_id(directorio):
     """extrae el numero de identificacion del sujeto desde el nombre de la carpeta y tambien el nombre de la carpeta pariente"""
 
     entidad = Path(directorio).parent.name
@@ -180,28 +199,7 @@ def get_id(directorio):
     return id_dir, sujeto, entidad
 
 
-def contar_tokens(respuestas):
-    """suma los tokens de entrada y salida de las respuestas y actualiza las globales"""
 
-    global CONTEO_TOKENS_IN, CONTEO_TOKENS_OUT, CONTEO_TOKENS_ALL, CONTEO_TOKENS_CACHE
-
-    token_dir_in = 0
-    token_dir_out = 0
-    token_dir_all = 0
-    token_dir_cache = 0
-
-    for res in respuestas:
-        token_dir_in += res[1]
-        token_dir_out += res[2]
-        token_dir_all += res[3]
-        token_dir_cache += (res[4] or 0)
-
-    CONTEO_TOKENS_IN += token_dir_in
-    CONTEO_TOKENS_OUT += token_dir_out
-    CONTEO_TOKENS_ALL += token_dir_all
-    CONTEO_TOKENS_CACHE += token_dir_cache
-
-    return token_dir_in, token_dir_out, token_dir_all, token_dir_cache
 
 
 
@@ -223,102 +221,110 @@ def procesar_respuestas(datos, respuestas, ruta_salida="resultado.json"):
 
 
 
+
 def ciclo_archivo(peticion_archivo):
     """
     Procesa un solo archivo de principio a fin:
     1. Lo sube a Gemini.
     2. Le hace la única petición de clasificación + verificación.
-    3. Elimina el archivo remoto (ya no se necesita en la nube de Gemini).
-    4. Renombra el PDF original en disco para que refleje la categoría detectada.
+    3. Elimina el archivo remoto.
+    4. Renombra el archivo original en disco según la categoría detectada.
     5. Guarda el resultado como JSON individual en OUTPUT_JSON.
-
-    peticion_archivo: tupla (ruta_archivo, datos_sujeto)
-    devuelve: [resultado_dict, tokens_in, tokens_out, tokens_total, tokens_cache]
     """
     ruta_archivo, datos_sujeto = peticion_archivo
 
     # --- 1. Subida y consulta a la IA ---
     archivo_nube = CLIENTE.files.upload(file=ruta_archivo)
     prompt = f"id: {datos_sujeto['id']}\nsujeto: {datos_sujeto['sujeto']}"
-    respuesta = ia_inspector(archivo_nube, prompt)
+    contexto = CONTEXTO_VERIFICADOR
+    schema = schema_verificador(RUTA_ODS)
+    modelo = MODELO_LITE
 
-    # Ya tenemos la respuesta, no hace falta mantener el archivo en la nube de Gemini
+    respuesta = ia_inspector(archivo_nube, prompt, contexto, schema, modelo)
     CLIENTE.files.delete(name=archivo_nube.name)
 
     # --- 2. Parseo de la respuesta ---
     resultado = json.loads(respuesta[0])
 
     # --- 3. Renombrar el documento original en disco ---
-    # Nuevo nombre: <id_documento detectado>_<nombre original saneado><extensión original>
-    nombre_limpio = limpiar_texto(ruta_archivo.stem)
-    nueva_ruta_archivo = ruta_archivo.parent / f"{resultado['id_documento']}_{resultado['tipo_documento']}_{nombre_limpio}{ruta_archivo.suffix}"
+    nueva_ruta_archivo = ruta_archivo.parent / f"{resultado['id_documento']}_{resultado['tipo_documento']}_{ruta_archivo.name}"
     ruta_archivo.rename(nueva_ruta_archivo)
-
-    # La ruta que guardamos en el resultado ya debe apuntar al archivo con su nombre nuevo
     resultado["ruta"] = str(nueva_ruta_archivo)
 
-    # --- 4. Guardado del JSON individual (nombre igual que antes, sin tocar) ---
-    nombre_json = f"{datos_sujeto['id']}_{resultado['id_documento']}_{nombre_limpio}.json"
+    # --- 4. Guardado del JSON individual ---
+    nombre_json = f"{datos_sujeto['id']}_{resultado['id_documento']}_{nueva_ruta_archivo.stem}.json"
     ruta_salida = OUTPUT_JSON / nombre_json
-    ruta_salida.write_text(
-        json.dumps(resultado, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
+    ruta_salida.write_text(json.dumps(resultado, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # contar_tokens() espera esta forma: [resultado, tokens_in, tokens_out, tokens_all, tokens_cache]
     return [resultado] + respuesta[1:]
+
+
+
 
 
 def operacion_dir(lista_carpetas):
     '''se le da la lista de las carpetas, busca los archivos que hay
-    y a cada uno le hace una operacion utilizando un multihilo par agilizar'''
+    y a cada uno le hace una operacion utilizando un multihilo para agilizar'''
 
-    global CONTEO_ARCHIVOS, CONTEO_DIR, PROMPT
+    global CONTEO_ARCHIVOS, CONTEO_DIR
 
     for carpeta in lista_carpetas:
-        CONTEO_DIR += 1 #contar carpetas
+        CONTEO_DIR += 1
 
-        id_sujeto, sujeto, entidad = get_id(carpeta) #obtener el identificador del sujeto de la carpeta
-        datos = {
-            "id": id_sujeto,
-            "sujeto": sujeto,
-            "entidad": entidad,
-            "carpeta": carpeta,
-            }
+        id_sujeto, sujeto, entidad = obtener_id(carpeta)
+        datos = {"id": id_sujeto, "sujeto": sujeto, "entidad": entidad, "carpeta": carpeta}
 
-        # --- PRE-PROCESAMIENTO DE ARCHIVOS ---
-        sanear_carpeta(carpeta)                  # 1. Quita caracteres feos y espacios
-        desbloquear_pdfs(carpeta, clave=id_sujeto) # 2. Desbloquea PDFs usando id_sujeto como clave
-
+        # --- PRE-PROCESAMIENTO ---
+        desbloquear_pdfs(carpeta, clave=id_sujeto)  # primero desbloquear, luego renombrar
         ruta_archivos = get_archivos(carpeta, FORMATOS)
         CONTEO_ARCHIVOS += len(ruta_archivos)
 
-        peticion_archivo = [] # creacion de lista pora que las peticioens sean (archivo + prompt)
-        for ruta in ruta_archivos:
-            peticion_archivo.append((ruta, datos))
+        peticion_archivo = [(ruta, datos) for ruta in ruta_archivos]
+        respuestas = POOL.map(ciclo_archivo, peticion_archivo)
 
-        nombre_json = f"{CONTEO_DIR}_{id_sujeto}_resultado.json"
-        respuestas = POOL.map(ciclo_archivo, peticion_archivo) #operacion de la IA multihilo
-        procesar_respuestas(datos, respuestas, RUTA_SALIDA / nombre_json)
+        # --- DETECCIÓN Y REPROCESO DE COMPILADOS ---
+        compilados = [res[0] for res in respuestas if res[0]["tipo_documento"] == "compilado"]
+
+        peticion_extra = []
+
+
+        ##METER ESTOE N UNA FUNCION PARECIDA A CICLO ARCHIVO
+        for comp in compilados:
+            ruta_comp = Path(comp["ruta"])
+            archivo_nube = CLIENTE.files.upload(file=ruta_comp)
+            respuesta_seg = ia_inspector(
+                archivo_nube, "Segmenta este PDF.",
+                CONTEXTO_SEGMENTADOR, schema_segmentador(), MODELO_FLASH
+            )
+            CLIENTE.files.delete(name=archivo_nube.name)
+            segmentos = json.loads(respuesta_seg[0])["segmentos"]
+
+            nuevas_rutas = partir_pdf(ruta_comp, segmentos)  # ver función abajo
+            peticion_extra += [(nueva_ruta, datos) for nueva_ruta in nuevas_rutas]
+
+        if peticion_extra:
+            respuestas += POOL.map(ciclo_archivo, peticion_extra)
+
         contar_tokens(respuestas)
 
-    POOL.close() #cerrar multihilo
+    POOL.close()
     POOL.join()
-
 
 #--------------------------CONFIG.PY----------------
 
-APIKEY = "nothing"
-#MODELO = "gemini-2.5-flash-lite"
-MODELO = "gemini-3.1-flash-lite"
-#MODELO = "gemini-2.5-flash"
+APIKEY = "nada"
+CLIENTE = genai.Client(api_key=APIKEY)   # <- bug: usabas 'apikey' en minúscula, no existía esa variable
 
+MODELO_FLASH = "gemini-2.5-flash"          # modelo completo: para el segmentador de compilados
+MODELO_LITE = "gemini-3.1-flash-lite" # modelo económico: para la verificación normal de cada documento
 
-DIR_TMP = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1048325323   GONZALEZ FONSECA CARMEN CRISTINA/")
+DIR_TMP = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1061692931 CIFUENTES SANJUAN OSCAR DANIEL/")
 DIR_PADRE = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/")
 RUTA_SALIDA = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/automata/tmp/")
 OUTPUT_JSON = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/automata/tmp/")
 OUTPUT_JSON.mkdir(parents=True, exist_ok=True)
+
+RUTA_ODS = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/reglas.ods")
 
 FORMATOS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".heic", ".tif", ".tiff", ".docx"}
 
@@ -332,9 +338,13 @@ CONTEO_DIR = 0
 POOL = ThreadPool(7)
 
 
-#----------------------------------EJECUCION-----------------------
+#----------------------------------CONTEXTOS DE LA IA-----------------------
 
-CONTEXTO_BASE = """Eres un identificador y examinador de documentos determinista. Examina cada archivo con OCR exhaustivo, sin importar el nombre del archivo, únicamente el contenido.
+CONTEXTO_SEGMENTADOR = """Examina este PDF compilado, que contiene varios documentos distintos pegados en un mismo archivo.
+Identifica cada documento independiente y devuelve la página donde empieza y la página donde termina cada uno, en orden.
+No clasifiques el contenido, solo delimita los cortes entre un documento y el siguiente."""
+
+CONTEXTO_VERIFICADOR = """Eres un identificador y examinador de documentos determinista. Examina cada archivo con OCR exhaustivo, sin importar el nombre del archivo, únicamente el contenido.
 
 CLASIFICACIÓN: asigna el documento a uno de los tipos del catálogo siguiente, según su PROPÓSITO/CONTENIDO PRINCIPAL, no según su formato (carné, carta, certificado, constancia). Si no encaja claramente en ninguno, usa "otros".
 "otros" es una respuesta válida y esperada, no un último recurso. Úsala con la misma comodidad que cualquier otra categoría del catálogo. Clasifica en una categoría específica solo si el documento cumple sus características centrales, no solo si comparte alguna palabra, tema, o mención superficial con ella. Ante duda razonable entre una categoría específica y "otros", responde "otros".
@@ -354,58 +364,12 @@ Responde únicamente con la estructura de salida indicada, sin saludos ni texto 
 Además, incluye "razon_clasificacion": una explicación breve (máximo 15 palabras) de por qué elegiste ese tipo de documento y no otro parecido.
 
 Catálogo de tipos de documento:
-"""
-
-RUTA_ODS = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/reglas.ods")
-
-FINALCONTEXT = CONTEXTO_BASE + reglasods(RUTA_ODS)
-print(FINALCONTEXT)
-SCHEMA = esquemaods(RUTA_ODS)
-
-CLIENTE, CONFIG, MODELO = config_gemini(APIKEY, MODELO, FINALCONTEXT, SCHEMA)
+""" + ods_string(RUTA_ODS)
 
 
+#----------------------------------EJECUCION-----------------------
 
-carpeta = DIR_TMP
-#buscar_dir(DIR_PADRE, ruta_carpetas)
-
-
-
-id_sujeto, sujeto, entidad = get_id(carpeta) #obtener el identificador del sujeto de la carpeta
-datos = {
-    "id": id_sujeto,
-    "sujeto": sujeto,
-    "entidad": entidad,
-    "carpeta": carpeta,
-    }
-
-# --- PRE-PROCESAMIENTO DE ARCHIVOS ---
-sanear_carpeta(carpeta)                  # 1. Quita caracteres feos y espacios
-desbloquear_pdfs(carpeta, clave=id_sujeto) # 2. Desbloquea PDFs usando id_sujeto como clave
-
-ruta_archivos = get_archivos(carpeta, FORMATOS)
-CONTEO_ARCHIVOS += len(ruta_archivos)
-
-cont = 0
-for ruta in ruta_archivos:
-
-    print(cont,"---",ruta.name)
-    cont += 1
-
-peticion_archivo = [(ruta, datos) for ruta in ruta_archivos]
-
-#peticion_archivo = [(ruta_archivos[9], datos)]
-
-respuestas = POOL.map(ciclo_archivo, peticion_archivo)
-POOL.close()
-POOL.join()
-
-contar_tokens(respuestas)
-
-
-
-
-
+operacion_dir([DIR_TMP])
 
 
 
