@@ -1,0 +1,14 @@
+{
+  "id_documento": 16,
+  "tipo_documento": "referencia_personal",
+  "verificacion_identidad": "NO",
+  "verificacion_nombre": "SI",
+  "razon_clasificacion": "Es una recomendación personal de un excompañero, no una certificación laboral de la empresa.",
+  "requerimientos": {
+    "req1": null,
+    "req2": "SI",
+    "req3": "1",
+    "req4": null
+  },
+  "ruta": "/home/bdi/Documentos/prototipo_automatizacion/TEMP/ANDRES_ANGULO/TIGO/53044143 ABRIL QUINTERO ALEXA MILENA/DOCUMENTOS.pdf (páginas 27-27)"
+}

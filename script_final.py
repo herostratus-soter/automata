@@ -19,10 +19,10 @@ MODELO_LITE = "gemini-3.1-flash-lite"  # modelo económico: para clasificar docu
 
 
 DIR_PADRE = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/")
-OUTPUT_JSON = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/automata/tmp/")
+OUTPUT_JSON = Path("/home/bdi/Documentos/prototipo_automatizacion/automata/tmp/")
 OUTPUT_JSON.mkdir(parents=True, exist_ok=True)
 
-RUTA_ODS = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/reglas.ods")
+RUTA_ODS = Path("/home/bdi/Documentos/prototipo_automatizacion/automata/reglas.ods")
 
 FORMATOS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".heic", ".tif", ".tiff", ".docx"}
 
@@ -95,6 +95,8 @@ Un documento NO termina solo porque:
 - La numeración de página continúa de forma consecutiva (ej. "Página 3 de 9" seguida de "Página 4 de 9") — eso indica que es EL MISMO documento multipágina, no uno nuevo por página.
 
 Para cada segmento identificado, clasifícalo con el mismo criterio de precisión que usarías para un documento suelto: usa "otros" si no encaja claramente en ninguna categoría, no fuerces una categoría por parecido superficial.
+
+Tener en cuenta que los cursos otorgados por Salesland pueden estar seguidos y parecer un documento continuo pero en realidad ser diferentes.
 
 Catálogo de tipos de documento:
 """
@@ -413,7 +415,7 @@ def operacion_dir(lista_carpetas):
 
 
 #--------------------------EJECUCIÓN----------------
-DIR_TMP = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/ANDRES_ANGULO/1018453773 DUCUARA GUZMAN JUAN CAMILO/")
+DIR_TMP = Path("/home/bdi/Documentos/prototipo_automatizacion/TEMP/ANDRES_ANGULO/TIGO/53044143 ABRIL QUINTERO ALEXA MILENA/")
 
 operacion_dir([DIR_TMP])
 

@@ -1,0 +1,14 @@
+{
+  "id_documento": 10,
+  "tipo_documento": "antecedente_procuraduria",
+  "verificacion_identidad": "SI",
+  "verificacion_nombre": "SI",
+  "razon_clasificacion": "Es un certificado oficial de antecedentes disciplinarios emitido por la Procuraduría General de la Nación.",
+  "requerimientos": {
+    "req1": "NO",
+    "req2": null,
+    "req3": null,
+    "req4": null
+  },
+  "ruta": "/home/bdi/Documentos/prototipo_automatizacion/TEMP/ANDRES_ANGULO/TIGO/53044143 ABRIL QUINTERO ALEXA MILENA/Certificado.pdf"
+}

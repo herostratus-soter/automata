@@ -1,0 +1,14 @@
+{
+  "id_documento": 13,
+  "tipo_documento": "pension_o_cesantias",
+  "verificacion_identidad": "SI",
+  "verificacion_nombre": "SI",
+  "razon_clasificacion": "El documento es un certificado de afiliación a fondo de pensiones obligatorio.",
+  "requerimientos": {
+    "req1": "PENSIONES",
+    "req2": null,
+    "req3": null,
+    "req4": null
+  },
+  "ruta": "/home/bdi/Documentos/prototipo_automatizacion/TEMP/ANDRES_ANGULO/TIGO/53044143 ABRIL QUINTERO ALEXA MILENA/DOCUMENTOS.pdf (páginas 33-33)"
+}

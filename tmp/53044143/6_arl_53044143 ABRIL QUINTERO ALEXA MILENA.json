@@ -1,0 +1,14 @@
+{
+  "id_documento": 6,
+  "tipo_documento": "arl",
+  "verificacion_identidad": "SI",
+  "verificacion_nombre": "SI",
+  "razon_clasificacion": "Es un certificado de afiliación a la ARL Sura.",
+  "requerimientos": {
+    "req1": null,
+    "req2": null,
+    "req3": null,
+    "req4": null
+  },
+  "ruta": "/home/bdi/Documentos/prototipo_automatizacion/TEMP/ANDRES_ANGULO/TIGO/53044143 ABRIL QUINTERO ALEXA MILENA/ARL 53044143.pdf"
+}
