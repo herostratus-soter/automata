@@ -22,7 +22,7 @@ DIR_PADRE = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizaci
 OUTPUT_JSON = Path("/home/bdi/Documentos/prototipo_automatizacion/automata/tmp/")
 OUTPUT_JSON.mkdir(parents=True, exist_ok=True)
 
-RUTA_ODS = Path("/home/bdi/Documentos/prototipo_automatizacion/automata/reglas2.ods")
+RUTA_ODS = Path("/home/bdi/Documentos/prototipo_automatizacion/automata/reglas.ods")
 
 FORMATOS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".heic", ".tif", ".tiff", ".docx"}
 
