@@ -526,27 +526,54 @@ def operacion_dir(lista_carpetas):
     for carpeta in lista_carpetas:
         CONTEO_DIR += 1
         id_sujeto, sujeto, entidad = obtener_id(carpeta)
+        cliente = carpeta.parent.name
+        asesor  = carpeta.parent.parent.name
+        nombre_contratado = sujeto[len(id_sujeto):].strip() if id_sujeto and sujeto.startswith(id_sujeto) else sujeto
+        if not nombre_contratado:
+            nombre_contratado = sujeto
 
-        carpeta_salida = OUTPUT_JSON / id_sujeto  # una subcarpeta de salida por sujeto
+        carpeta_salida = OUTPUT_JSON / id_sujeto
         carpeta_salida.mkdir(parents=True, exist_ok=True)
-        datos = {"id": id_sujeto, "sujeto": sujeto, "entidad": entidad, "carpeta": carpeta, "salida": carpeta_salida}
 
-        desbloquear_pdfs(carpeta, clave=id_sujeto)  # único paso que toca el original, y solo si estaba cifrado
+        datos = {
+            "id": id_sujeto,
+            "sujeto": sujeto,
+            "nombre_contratado": nombre_contratado,
+            "entidad": entidad,
+            "cliente": cliente,
+            "asesor": asesor,
+            "carpeta": carpeta,
+            "salida": carpeta_salida,
+        }
+
+        desbloquear_pdfs(carpeta, clave=id_sujeto)
         ruta_archivos = get_archivos(carpeta, FORMATOS)
         CONTEO_ARCHIVOS += len(ruta_archivos)
 
-        # --- primera pasada: cada archivo se clasifica sobre su propia copia temporal ---
+        # --- primera pasada ---
         peticion_primera = [(ruta, datos) for ruta in ruta_archivos]
         respuestas = POOL.map(ciclo_archivo, peticion_primera)
 
-        # --- segunda pasada: solo para los que salieron como compilado ---
+        # --- segunda pasada ---
         peticion_segunda, respuestas_seg = procesar_compilado(respuestas, datos)
-        if peticion_segunda:  # puede que esta carpeta no tenga ningún compilado
+        if peticion_segunda:
             respuestas += POOL.map(ciclo_archivo2, peticion_segunda)
 
-        contar_tokens(respuestas + respuestas_seg)  # suma todo: normales + compilados + segmentador
+        contar_tokens(respuestas + respuestas_seg)
 
-    POOL.close()  # se cierra una sola vez, al terminar TODAS las carpetas
+        # --- JSON ecuménico de la carpeta ---
+        ecumenico = {
+            "numero_de_identidad_del_contratado": datos["id"],
+            "nombre_del_contratado":               datos["nombre_contratado"],
+            "ruta_carpeta":                        str(datos["carpeta"]),
+            "cliente":                             datos["cliente"],
+            "asesor":                              datos["asesor"],
+        }
+        (carpeta_salida / "0_ecumenico.json").write_text(
+            json.dumps(ecumenico, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    POOL.close()
     POOL.join()
 
 
