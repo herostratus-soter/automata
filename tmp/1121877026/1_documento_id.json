@@ -1,0 +1,10 @@
+{
+  "id_documento": 1,
+  "tipo_documento": "documento_id",
+  "verificacion_identidad": "SI",
+  "verificacion_nombre": "SI",
+  "razon_clasificacion": "Es una cédula de ciudadanía colombiana con foto y datos de identidad.",
+  "fiabilidad": 1.0,
+  "documento_id_tipo": "CC",
+  "ruta": "/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1121877026 GARCIA LOPEZ NATHALY/fotocopia cedula.pdf"
+}

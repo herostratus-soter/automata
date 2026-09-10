@@ -1,0 +1,10 @@
+{
+  "id_documento": 14,
+  "tipo_documento": "antecedente_contraloria",
+  "verificacion_identidad": "SI",
+  "verificacion_nombre": "NO",
+  "razon_clasificacion": "Es un certificado oficial de antecedentes de responsabilidad fiscal de la Contraloría General.",
+  "fiabilidad": 1.0,
+  "antecedente_contraloria_resultado": "NO",
+  "ruta": "/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1121877026 GARCIA LOPEZ NATHALY/Antecedentes CONTRALORIA - Nathaly Garcia L..pdf"
+}

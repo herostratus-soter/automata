@@ -1,0 +1,10 @@
+{
+  "id_documento": 13,
+  "tipo_documento": "antecedente_procuraduria",
+  "verificacion_identidad": "SI",
+  "verificacion_nombre": "SI",
+  "razon_clasificacion": "Es un certificado oficial de antecedentes disciplinarios emitido por la Procuraduría General de la Nación.",
+  "fiabilidad": 1.0,
+  "antecedente_procuraduria_resultado": "NO",
+  "ruta": "/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1121877026 GARCIA LOPEZ NATHALY/Certificado de antecendes PROCURADURIA - Nathaly Garcia L..pdf"
+}

@@ -1,0 +1,10 @@
+{
+  "id_documento": 16,
+  "tipo_documento": "pension_o_cesantias",
+  "verificacion_identidad": "SI",
+  "verificacion_nombre": "SI",
+  "razon_clasificacion": "Certificado de afiliación a fondo de pensiones y cesantías emitido por Porvenir.",
+  "fiabilidad": 1.0,
+  "pension_o_cesantias_tipo": "PENSIONES Y CESANTIAS",
+  "ruta": "/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1121877026 GARCIA LOPEZ NATHALY/certificado_1121877026_5291715418212150898.pdf"
+}

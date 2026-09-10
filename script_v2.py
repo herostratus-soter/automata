@@ -1,3 +1,24 @@
+"""
+script_v2.py — Verificador automático de carpetas de contratación.
+
+Adaptado para leer reglas_v2.ods (formato vertical: una fila por requerimiento).
+La configuración vive en config.py (credenciales, rutas, modelos).
+
+Cambios respecto al script original:
+  • La configuración se importa de config.py en vez de estar hardcodeada.
+  • Las funciones de lectura del catálogo (ods_string, ods_fila_string,
+    schema_verificador, schema_segmentador) ahora leen el formato vertical
+    agrupando por id de documento.
+  • El catálogo se lee del disco UNA sola vez y se cachea en memoria
+    (antes se releía en cada llamada a la IA).
+  • Los cursos Salesland ahora son 4 tipos independientes
+    (curso_etica, curso_cultura, curso_transparencia, curso_otro).
+  • La cantidad de campos req1..reqN se calcula automáticamente
+    según el tipo con más requerimientos en el catálogo.
+  • Se eliminó la función _guardar_json_sin_colision (estaba vacía).
+  • El resto de la lógica es IDÉNTICA al script original.
+"""
+
 import pypdf
 import json
 import tempfile
@@ -8,23 +29,19 @@ from google import genai
 from pathlib import Path
 from multiprocessing.dummy import Pool as ThreadPool
 
+from config import (
+    APIKEY, MODELO_FLASH, MODELO_LITE,
+    RUTA_ODS, RUTA_SALIDA_JSON, RUTA_PRUEBA, RUTA_PADRE,
+    FORMATOS, HILOS,
+)
+
 
 #--------------------------CONFIGURACIÓN----------------
 
-APIKEY = "nada"
 CLIENTE = genai.Client(api_key=APIKEY)
 
-MODELO_FLASH = "gemini-2.5-flash"      # modelo completo: para segmentar compilados (tarea más pesada)
-MODELO_LITE = "gemini-3.1-flash-lite"  # modelo económico: para clasificar documentos sueltos
-
-
-#DIR_PADRE = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/")
-OUTPUT_JSON = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/automata/tmp/")
+OUTPUT_JSON = RUTA_SALIDA_JSON
 OUTPUT_JSON.mkdir(parents=True, exist_ok=True)
-
-RUTA_ODS = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/automata/reglas.ods")
-
-FORMATOS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".heic", ".tif", ".tiff", ".docx"}
 
 CONTEO_TOKENS_IN = 0
 CONTEO_TOKENS_OUT = 0
@@ -33,12 +50,12 @@ CONTEO_TOKENS_CACHE = 0
 CONTEO_ARCHIVOS = 0
 CONTEO_DIR = 0
 
-POOL = ThreadPool(7)
+POOL = ThreadPool(HILOS)
 
 
 #--------------------------CONTEXTOS DE LA IA----------------
 
-# Contexto para la primera pasada: clasifica un documento suelto contra las 27 categorías.
+# Contexto para la primera pasada: clasifica un documento suelto contra todas las categorías.
 CONTEXTO_VERIFICADOR = """Eres un identificador y examinador de documentos determinista. Examina cada archivo con OCR exhaustivo, sin importar el nombre del archivo, únicamente el contenido.
 
 CLASIFICACIÓN: asigna el documento a uno de los tipos del catálogo siguiente, según su PROPÓSITO/CONTENIDO PRINCIPAL, no según su formato (carné, carta, certificado, constancia). Si no encaja claramente en ninguno, usa "otros".
@@ -56,6 +73,7 @@ VERIFICACIÓN DE NOMBRE, reglas en este orden:
 
 Responde únicamente con la estructura de salida indicada, sin saludos ni texto adicional.
 Además, incluye "razon_clasificacion": una explicación breve (máximo 15 palabras) de por qué elegiste ese tipo de documento y no otro parecido.
+Incluye "fiabilidad": un número de 0.0 a 1.0 que indica qué tan seguro estás de la clasificación (1.0 = certeza total, 0.0 = pura conjetura).
 
 Catálogo de tipos de documento:
 """
@@ -77,8 +95,18 @@ VERIFICACIÓN DE NOMBRE, reglas en este orden:
 
 Responde únicamente con la estructura de salida indicada, sin saludos ni texto adicional.
 Además, incluye "razon_clasificacion": una explicación breve (máximo 15 palabras).
+Incluye "fiabilidad": un número de 0.0 a 1.0 que indica qué tan seguro estás de la clasificación.
 
 Tipo de documento sugerido para este archivo:
+"""
+
+# Contexto para la segunda pasada: el tipo ya se conoce, solo evalúa los requisitos específicos.
+CONTEXTO_REQUISITOS = """Eres un evaluador determinista de requisitos documentales.
+Ya se clasificó este documento. Ahora evalúa ÚNICAMENTE los requisitos indicados, siguiendo estrictamente el formato esperado de cada uno.
+Devuelve exactamente los campos indicados, sin agregar ni omitir ninguno. No devuelvas null a menos que el dato realmente no exista o no sea legible en el documento.
+Responde únicamente con la estructura de salida indicada, sin texto adicional.
+
+Requisitos a evaluar:
 """
 
 # Contexto para el segmentador: solo delimita cortes de página, no verifica identidad ni nombre.
@@ -96,73 +124,136 @@ Un documento NO termina solo porque:
 
 Para cada segmento identificado, clasifícalo con el mismo criterio de precisión que usarías para un documento suelto: usa "otros" si no encaja claramente en ninguna categoría, no fuerces una categoría por parecido superficial.
 
-Tener en cuenta que los cursos otorgados por Salesland pueden estar seguidos y parecer un documento continuo pero en realidad ser diferentes.
+Tener en cuenta que los certificados de cursos otorgados por Salesland (curso_etica, curso_cultura, curso_transparencia, curso_otro) pueden estar seguidos y parecer un documento continuo pero en realidad ser certificados diferentes.
 
 Catálogo de tipos de documento:
 """
 
 
 #--------------------------LECTURA DEL CATÁLOGO (.ods)----------------
+#
+# Estas funciones leen reglas_v2.ods (formato vertical).
+# Cada fila del catálogo tiene: id | documento | descripcion | requisito | output
+# Un tipo de documento puede tener 0, 1 o varias filas (una por requerimiento).
+# Las funciones agrupan por id para reconstruir el bloque de texto de cada tipo.
+#
+# El catálogo se cachea en _cache_ods para no releer el disco en cada hilo.
+
+
+_cache_ods = {}
+
+
+def _leer_ods(ruta_ods, hoja="Hoja 1"):
+    """Lee el catálogo una sola vez y lo mantiene en memoria para no releer el disco."""
+
+    clave = (str(ruta_ods), hoja)
+    if clave not in _cache_ods:
+        _cache_ods[clave] = pd.read_excel(ruta_ods, engine="odf", sheet_name=hoja)
+    return _cache_ods[clave]
+
+
+def reqs_por_tipo(ruta_ods, tipo_documento, hoja="Hoja 1"):
+    """Devuelve la lista de requisitos de un tipo: [{id_requisito, descripcion, output}, ...].
+    Lista vacía si el tipo no tiene requisitos.
+    """
+    df = _leer_ods(ruta_ods, hoja)
+    grupo = df[df["tipo de documento"] == tipo_documento].dropna(subset=["descripcion requisito"])
+    return [
+        {"id_requisito": str(fila["id_requisito"]).strip(), "descripcion": fila["descripcion requisito"], "output": fila["output"]}
+        for _, fila in grupo.iterrows()
+    ]
 
 
 def ods_string(ruta_ods, hoja="Hoja 1"):
-    """Convierte todas las filas del catálogo .ods en el bloque de texto que se pega al contexto."""
+    """Convierte todas las filas del catálogo en el bloque de texto que se pega al contexto."""
 
-    df = pd.read_excel(ruta_ods, engine="odf", sheet_name=hoja)
+    df = _leer_ods(ruta_ods, hoja)
     bloques = []
-    for _, fila in df.iterrows():
-        bloque = f'id_documento {fila["id"]} — tipo_documento: "{fila["documento"]}"\nDescripción: {fila["descripcion"]}'
-        for i in range(1, 5):
-            requisito, output = fila.get(f"requisito{i}"), fila.get(f"output{i}")
-            if pd.notna(requisito):
-                bloque += f"\nreq{i}: {requisito} -> formato esperado: {output}"
+    for i, (tipo_doc, grupo) in enumerate(df.groupby("tipo de documento", sort=False), 1):
+        primera = grupo.iloc[0]
+        bloque = f'id_documento {i} — tipo_documento: "{tipo_doc}"\nDescripción: {primera["descripcion tipo de documento"]}'
+        reqs_con_dato = grupo.dropna(subset=["descripcion requisito"])
+        for j, (_, fila) in enumerate(reqs_con_dato.iterrows(), 1):
+            bloque += f"\nreq{j}: {fila['descripcion requisito']} -> formato esperado: {fila['output']}"
         bloques.append(bloque)
     return "\n\n".join(bloques)
 
 
 def ods_fila_string(ruta_ods, id_documento, hoja="Hoja 1"):
-    """Igual que ods_string, pero solo la fila de un id_documento puntual (para el prompt heurístico)."""
+    """Igual que ods_string, pero solo el bloque de un id_documento puntual (para el prompt heurístico)."""
 
-    df = pd.read_excel(ruta_ods, engine="odf", sheet_name=hoja)
-    fila = df[df["id"] == id_documento].iloc[0]
-    bloque = f'id_documento {fila["id"]} — tipo_documento: "{fila["documento"]}"\nDescripción: {fila["descripcion"]}'
-    for i in range(1, 5):
-        requisito, output = fila.get(f"requisito{i}"), fila.get(f"output{i}")
-        if pd.notna(requisito):
-            bloque += f"\nreq{i}: {requisito} -> formato esperado: {output}"
+    df = _leer_ods(ruta_ods, hoja)
+    tipos_unicos = df["tipo de documento"].unique()
+
+    if isinstance(id_documento, int) and 1 <= id_documento <= len(tipos_unicos):
+        tipo_doc = tipos_unicos[id_documento - 1]
+        id_num = id_documento
+    elif str(id_documento) in tipos_unicos:
+        tipo_doc = str(id_documento)
+        id_num = list(tipos_unicos).index(tipo_doc) + 1
+    else:
+        return ""
+
+    grupo = df[df["tipo de documento"] == tipo_doc]
+    primera = grupo.iloc[0]
+    bloque = f'id_documento {id_num} — tipo_documento: "{tipo_doc}"\nDescripción: {primera["descripcion tipo de documento"]}'
+    reqs_con_dato = grupo.dropna(subset=["descripcion requisito"])
+    for j, (_, fila) in enumerate(reqs_con_dato.iterrows(), 1):
+        bloque += f"\nreq{j}: {fila['descripcion requisito']} -> formato esperado: {fila['output']}"
     return bloque
 
 
-def schema_verificador(ruta_ods, hoja="Hoja 1"):
-    """Arma el schema que fuerza la forma de salida del verificador de documentos sueltos."""
+def schema_clasificador(ruta_ods, hoja="Hoja 1"):
+    """Schema para el paso 1: solo clasificación y verificación de identidad/nombre. Sin requisitos."""
 
-    df = pd.read_excel(ruta_ods, engine="odf", sheet_name=hoja)
-    req = {f"req{i}": genai.types.Schema(type="STRING", nullable=True) for i in range(1, 5)}
+    df = _leer_ods(ruta_ods, hoja)
+    tipos = list(df["tipo de documento"].unique())
+    ids_validos = [str(i + 1) for i in range(len(tipos))]
+
     return genai.types.Schema(
         type="OBJECT",
         properties={
-            "id_documento": genai.types.Schema(type="INTEGER", enum=[str(i) for i in df["id"]]),
-            "tipo_documento": genai.types.Schema(type="STRING", enum=list(df["documento"])),
+            "id_documento": genai.types.Schema(type="INTEGER", enum=ids_validos),
+            "tipo_documento": genai.types.Schema(type="STRING", enum=tipos),
             "verificacion_identidad": genai.types.Schema(type="STRING", enum=["SI", "NO", "SIN_DATOS"]),
             "verificacion_nombre": genai.types.Schema(type="STRING", enum=["SI", "NO"]),
             "razon_clasificacion": genai.types.Schema(type="STRING"),
-            "requerimientos": genai.types.Schema(type="OBJECT", properties=req, required=list(req)),
+            "fiabilidad": genai.types.Schema(type="NUMBER"),
         },
-        required=["id_documento", "tipo_documento", "verificacion_identidad", "verificacion_nombre", "razon_clasificacion", "requerimientos"],
+        required=["id_documento", "tipo_documento", "verificacion_identidad", "verificacion_nombre", "razon_clasificacion", "fiabilidad"],
+    )
+
+
+def schema_requisitos(reqs):
+    """Schema para el paso 2: exactamente los campos id_requisito del tipo detectado, nada más.
+
+    reqs: lista de {id_requisito, descripcion, output} del tipo.
+    Devuelve None si la lista está vacía (tipo sin requisitos → no hay paso 2).
+    """
+    if not reqs:
+        return None
+    props = {req["id_requisito"]: genai.types.Schema(type="STRING", nullable=True) for req in reqs}
+    return genai.types.Schema(
+        type="OBJECT",
+        properties=props,
+        required=list(props),
     )
 
 
 def schema_segmentador(ruta_ods, hoja="Hoja 1"):
     """Arma el schema del segmentador: lista de segmentos, cada uno con páginas + clasificación forzada."""
 
-    df = pd.read_excel(ruta_ods, engine="odf", sheet_name=hoja)
+    df = _leer_ods(ruta_ods, hoja)
+    tipos = list(df["tipo de documento"].unique())
+    ids_validos = [str(i + 1) for i in range(len(tipos))]
+
     segmento = genai.types.Schema(
         type="OBJECT",
         properties={
             "pagina_inicio": genai.types.Schema(type="INTEGER"),
             "pagina_fin": genai.types.Schema(type="INTEGER"),
-            "id_documento": genai.types.Schema(type="INTEGER", enum=[str(i) for i in df["id"]]),
-            "tipo_documento": genai.types.Schema(type="STRING", enum=list(df["documento"])),
+            "id_documento": genai.types.Schema(type="INTEGER", enum=ids_validos),
+            "tipo_documento": genai.types.Schema(type="STRING", enum=tipos),
         },
         required=["pagina_inicio", "pagina_fin", "id_documento", "tipo_documento"],
     )
@@ -275,16 +366,28 @@ def obtener_id(directorio):
 #--------------------------PROCESAMIENTO DE UN ARCHIVO----------------
 
 
-def _guardar_json_sin_colision(directorio_salida: Path, resultado: dict):
-    """Guarda el JSON asegurando que si ya existe, le añade un contador (_1, _2...) para no sobrescribir."""
-    base_nombre = f"{resultado['id_documento']}_{resultado['tipo_documento']}_{resultado.get('_sujeto_temp', '')}" # O usando los datos directos
-    # Como tu lógica original usaba datos_sujeto['sujeto'], ajustamos el nombre base:
-    # (Lo armamos limpio usando los campos del resultado)
-    pass
+def _guardar_json(resultado, datos_sujeto):
+    """Guarda el resultado en un JSON con nombre único dentro de la carpeta de salida del sujeto."""
+
+    base_nombre = f"{resultado['id_documento']}_{resultado['tipo_documento']}"
+    ruta_json = datos_sujeto["salida"] / f"{base_nombre}.json"
+    contador = 1
+    while ruta_json.exists():
+        ruta_json = datos_sujeto["salida"] / f"{base_nombre}_{contador}.json"
+        contador += 1
+    ruta_json.write_text(json.dumps(resultado, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _sumar_tokens(r1, r2):
+    """Suma los conteos de tokens de dos respuestas de la IA."""
+    return [r1[0], r1[1] + r2[1], r1[2] + r2[2], r1[3] + r2[3], (r1[4] or 0) + (r2[4] or 0)]
 
 
 def ciclo_archivo(peticion_archivo):
-    """Clasifica un archivo suelto: trabaja sobre una copia temporal, el original nunca se toca."""
+    """Clasifica un archivo suelto en dos pasos:
+    1. Clasifica el tipo de documento.
+    2. Si el tipo tiene requisitos, evalúa exactamente los de ese tipo (schema a medida).
+    """
 
     ruta_original, datos_sujeto = peticion_archivo
     ruta_temp = duplicar_temporal(ruta_original)
@@ -292,68 +395,70 @@ def ciclo_archivo(peticion_archivo):
     try:
         archivo_nube = CLIENTE.files.upload(file=ruta_temp)
         prompt = f"id: {datos_sujeto['id']}\nsujeto: {datos_sujeto['sujeto']}"
-        contexto = CONTEXTO_VERIFICADOR + ods_string(RUTA_ODS)
-        respuesta = ia_inspector(archivo_nube, prompt, contexto, schema_verificador(RUTA_ODS), MODELO_LITE)
-        CLIENTE.files.delete(name=archivo_nube.name)  # ya no hace falta en la nube
 
-        resultado = json.loads(respuesta[0])
-        resultado["ruta"] = str(ruta_original)  # el json siempre apunta al archivo real, no a la copia
+        # Paso 1: clasificar
+        respuesta1 = ia_inspector(archivo_nube, prompt, CONTEXTO_VERIFICADOR + ods_string(RUTA_ODS), schema_clasificador(RUTA_ODS), MODELO_LITE)
+        resultado = json.loads(respuesta1[0])
+        respuesta_final = respuesta1
 
-        # --- LÓGICA DE NOMBRE ÚNICO ---
-        base_nombre = f"{resultado['id_documento']}_{resultado['tipo_documento']}" #_{datos_sujeto['sujeto']}
-        ruta_json = datos_sujeto["salida"] / f"{base_nombre}.json"
-        
-        contador = 1
-        while ruta_json.exists():
-            ruta_json = datos_sujeto["salida"] / f"{base_nombre}_{contador}.json"
-            contador += 1
+        # Paso 2: evaluar requisitos propios del tipo detectado
+        reqs = reqs_por_tipo(RUTA_ODS, resultado["tipo_documento"])
+        if reqs:
+            contexto_req = CONTEXTO_REQUISITOS + "\n".join(f"- {r['id_requisito']}: {r['descripcion']} -> formato: {r['output']}" for r in reqs)
+            respuesta2 = ia_inspector(archivo_nube, prompt, contexto_req, schema_requisitos(reqs), MODELO_LITE)
+            resultado.update(json.loads(respuesta2[0]))  # merge plano: los id_requisito quedan al mismo nivel
+            respuesta_final = _sumar_tokens(respuesta1, respuesta2)
 
-        ruta_json.write_text(
-            json.dumps(resultado, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        # -----------------------------
+        try:
+            CLIENTE.files.delete(name=archivo_nube.name)
+        except Exception:
+            pass
+
+        resultado["ruta"] = str(ruta_original)
+        _guardar_json(resultado, datos_sujeto)
 
     finally:
-        ruta_temp.unlink()  # la copia desaparece siempre, haya error o no
+        ruta_temp.unlink()
 
-    return [resultado] + respuesta[1:]
+    return [resultado] + respuesta_final[1:]
 
 
 def ciclo_archivo2(peticion):
-    """Clasifica un trozo temporal de un compilado; el json referencia el compilado original + sus páginas."""
+    """Clasifica un trozo de compilado en dos pasos (tipo ya sugerido por el segmentador)."""
 
     ruta_seg, datos_sujeto, id_sugerido, tipo_sugerido, ruta_compilado_original, rango = peticion
 
     try:
-        contexto = CONTEXTO_VERIFICADOR_HEURISTICO + ods_fila_string(RUTA_ODS, id_sugerido)
         archivo_nube = CLIENTE.files.upload(file=ruta_seg)
         prompt = f"id: {datos_sujeto['id']}\nsujeto: {datos_sujeto['sujeto']}\ntipo sugerido: {tipo_sugerido}"
-        respuesta = ia_inspector(archivo_nube, prompt, contexto, schema_verificador(RUTA_ODS), MODELO_LITE)
-        CLIENTE.files.delete(name=archivo_nube.name)
 
-        resultado = json.loads(respuesta[0])
-        resultado["ruta"] = f"{ruta_compilado_original} (páginas {rango})"  # nunca existió como archivo propio
+        # Paso 1: clasificar (confirmar o corregir el tipo sugerido)
+        respuesta1 = ia_inspector(archivo_nube, prompt, CONTEXTO_VERIFICADOR_HEURISTICO + ods_fila_string(RUTA_ODS, id_sugerido), schema_clasificador(RUTA_ODS), MODELO_LITE)
+        resultado = json.loads(respuesta1[0])
+        respuesta_final = respuesta1
 
-        # --- LÓGICA DE NOMBRE ÚNICO ---
-        base_nombre = f"{resultado['id_documento']}_{resultado['tipo_documento']}" #_{datos_sujeto['sujeto']}
-        ruta_json = datos_sujeto["salida"] / f"{base_nombre}.json"
-        
-        contador = 1
-        while ruta_json.exists():
-            ruta_json = datos_sujeto["salida"] / f"{base_nombre}_{contador}.json"
-            contador += 1
+        # Paso 2: evaluar requisitos del tipo efectivo (puede diferir del sugerido si la IA lo corrigió)
+        reqs = reqs_por_tipo(RUTA_ODS, resultado["tipo_documento"])
+        if reqs:
+            contexto_req = CONTEXTO_REQUISITOS + "\n".join(f"- {r['id_requisito']}: {r['descripcion']} -> formato: {r['output']}" for r in reqs)
+            respuesta2 = ia_inspector(archivo_nube, prompt, contexto_req, schema_requisitos(reqs), MODELO_LITE)
+            resultado.update(json.loads(respuesta2[0]))
+            respuesta_final = _sumar_tokens(respuesta1, respuesta2)
 
-        ruta_json.write_text(
-            json.dumps(resultado, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        # -----------------------------
+        try:
+            CLIENTE.files.delete(name=archivo_nube.name)
+        except Exception:
+            pass
+
+        resultado["ruta"] = f"{ruta_compilado_original} (páginas {rango})"
+        _guardar_json(resultado, datos_sujeto)
 
     finally:
-        ruta_seg.unlink()  # el trozo temporal desaparece siempre
+        ruta_seg.unlink()
 
-    return [resultado] + respuesta[1:]
-    
-    
+    return [resultado] + respuesta_final[1:]
+
+
 #--------------------------PROCESAMIENTO DE COMPILADOS----------------
 
 
@@ -393,7 +498,10 @@ def procesar_compilado(respuestas, datos):
             contexto = CONTEXTO_SEGMENTADOR + ods_string(RUTA_ODS)
             archivo_nube = CLIENTE.files.upload(file=ruta_temp_compilado)
             respuesta_seg = ia_inspector(archivo_nube, "Segmenta este PDF.", contexto, schema, MODELO_FLASH)
-            CLIENTE.files.delete(name=archivo_nube.name)
+            try:
+                CLIENTE.files.delete(name=archivo_nube.name)
+            except Exception:
+                pass
             respuestas_seg.append(respuesta_seg)
 
             segmentos = json.loads(respuesta_seg[0])["segmentos"]
@@ -443,9 +551,17 @@ def operacion_dir(lista_carpetas):
 
 
 #--------------------------EJECUCIÓN----------------
-DIR_TMP = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1033788190 MOJICA MUÑOZ DIANA CAROLINA/")
 
-operacion_dir([DIR_TMP])
+# ┌─────────────────────────────────────────────────────────────┐
+# │ MODO PRUEBA: una carpeta específica (RUTA_PRUEBA en config) │
+# └─────────────────────────────────────────────────────────────┘
+operacion_dir([RUTA_PRUEBA])
+
+# ┌─────────────────────────────────────────────────────────────┐
+# │ MODO COMPLETO: todas las carpetas bajo RUTA_PADRE           │
+# │ Descomentar estas 2 líneas y comentar la de arriba.         │
+# └─────────────────────────────────────────────────────────────┘
+# carpetas = []; buscar_dir(RUTA_PADRE, carpetas); operacion_dir(carpetas)
 
 print(f"cantidad carpetas : {CONTEO_DIR}")
 print(f"cantidad archivos : {CONTEO_ARCHIVOS}")

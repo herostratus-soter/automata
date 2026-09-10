@@ -1,0 +1,11 @@
+{
+  "id_documento": 2,
+  "tipo_documento": "contrato_laboral",
+  "verificacion_identidad": "SI",
+  "verificacion_nombre": "SI",
+  "razon_clasificacion": "Es un contrato de trabajo firmado entre Salesland y la trabajadora.",
+  "fiabilidad": 1.0,
+  "contrato_laboral_fecha": "20260616",
+  "contrato_laboral_firma": "SI",
+  "ruta": "/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/BANCO_DE_BOGOTA_JUNIO_2026/ALEXANDRA BARRERA/1121877026 GARCIA LOPEZ NATHALY/1121877026 CONTRATO.pdf"
+}
