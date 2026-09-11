@@ -19,6 +19,8 @@ Cambios respecto al script original:
   • El resto de la lógica es IDÉNTICA al script original.
 """
 
+import sys
+import time
 import pypdf
 import json
 import tempfile
@@ -33,7 +35,10 @@ from config import (
     APIKEY, MODELO_FLASH, MODELO_LITE,
     RUTA_ODS, RUTA_SALIDA_JSON, RUTA_PRUEBA, RUTA_PADRE,
     FORMATOS, HILOS,
+    RUTA_LOGS, MAX_REINTENTOS, ESPERA_BASE,
 )
+
+from robustez import reintentar, EstadoLote, configurar_logs
 
 
 #--------------------------CONFIGURACIÓN----------------
@@ -51,6 +56,8 @@ CONTEO_ARCHIVOS = 0
 CONTEO_DIR = 0
 
 POOL = ThreadPool(HILOS)
+
+log = configurar_logs(RUTA_LOGS)
 
 
 #--------------------------CONTEXTOS DE LA IA----------------
@@ -267,6 +274,7 @@ def schema_segmentador(ruta_ods, hoja="Hoja 1"):
 #--------------------------LLAMADAS A LA IA----------------
 
 
+@reintentar(max_intentos=MAX_REINTENTOS, base_espera=ESPERA_BASE)
 def ia_inspector(archivo_nube, prompt, contexto, schema, modelo):
     """Hace una consulta a Gemini y devuelve el texto de respuesta junto con el conteo de tokens."""
 
@@ -284,6 +292,20 @@ def ia_inspector(archivo_nube, prompt, contexto, schema, modelo):
         response.usage_metadata.total_token_count,
         (response.usage_metadata.cached_content_token_count or 0),
     ]
+
+
+@reintentar(max_intentos=MAX_REINTENTOS, base_espera=ESPERA_BASE)
+def subir_archivo(ruta):
+    """Sube un archivo a la API de Gemini con reintentos automáticos."""
+    return CLIENTE.files.upload(file=ruta)
+
+
+def eliminar_archivo(nombre):
+    """Elimina un archivo de la API de Gemini (best-effort, sin reintentos)."""
+    try:
+        CLIENTE.files.delete(name=nombre)
+    except Exception:
+        pass
 
 
 def contar_tokens(respuestas):
@@ -393,7 +415,7 @@ def ciclo_archivo(peticion_archivo):
     ruta_temp = duplicar_temporal(ruta_original)
 
     try:
-        archivo_nube = CLIENTE.files.upload(file=ruta_temp)
+        archivo_nube = subir_archivo(ruta_temp)
         prompt = f"id: {datos_sujeto['id']}\nsujeto: {datos_sujeto['sujeto']}"
 
         # Paso 1: clasificar
@@ -406,21 +428,22 @@ def ciclo_archivo(peticion_archivo):
         if reqs:
             contexto_req = CONTEXTO_REQUISITOS + "\n".join(f"- {r['id_requisito']}: {r['descripcion']} -> formato: {r['output']}" for r in reqs)
             respuesta2 = ia_inspector(archivo_nube, prompt, contexto_req, schema_requisitos(reqs), MODELO_LITE)
-            resultado.update(json.loads(respuesta2[0]))  # merge plano: los id_requisito quedan al mismo nivel
+            resultado.update(json.loads(respuesta2[0]))
             respuesta_final = _sumar_tokens(respuesta1, respuesta2)
 
-        try:
-            CLIENTE.files.delete(name=archivo_nube.name)
-        except Exception:
-            pass
+        eliminar_archivo(archivo_nube.name)
 
         resultado["ruta"] = str(ruta_original)
         _guardar_json(resultado, datos_sujeto)
 
+        return [resultado] + respuesta_final[1:]
+
+    except Exception as e:
+        log.error(f"✗ Archivo falló: {ruta_original.name} → {e}")
+        return None
+
     finally:
         ruta_temp.unlink()
-
-    return [resultado] + respuesta_final[1:]
 
 
 def ciclo_archivo2(peticion):
@@ -429,7 +452,7 @@ def ciclo_archivo2(peticion):
     ruta_seg, datos_sujeto, id_sugerido, tipo_sugerido, ruta_compilado_original, rango = peticion
 
     try:
-        archivo_nube = CLIENTE.files.upload(file=ruta_seg)
+        archivo_nube = subir_archivo(ruta_seg)
         prompt = f"id: {datos_sujeto['id']}\nsujeto: {datos_sujeto['sujeto']}\ntipo sugerido: {tipo_sugerido}"
 
         # Paso 1: clasificar (confirmar o corregir el tipo sugerido)
@@ -445,18 +468,19 @@ def ciclo_archivo2(peticion):
             resultado.update(json.loads(respuesta2[0]))
             respuesta_final = _sumar_tokens(respuesta1, respuesta2)
 
-        try:
-            CLIENTE.files.delete(name=archivo_nube.name)
-        except Exception:
-            pass
+        eliminar_archivo(archivo_nube.name)
 
         resultado["ruta"] = f"{ruta_compilado_original} (páginas {rango})"
         _guardar_json(resultado, datos_sujeto)
 
+        return [resultado] + respuesta_final[1:]
+
+    except Exception as e:
+        log.error(f"✗ Segmento falló: {ruta_compilado_original.name} ({rango}) → {e}")
+        return None
+
     finally:
         ruta_seg.unlink()
-
-    return [resultado] + respuesta_final[1:]
 
 
 #--------------------------PROCESAMIENTO DE COMPILADOS----------------
@@ -496,12 +520,9 @@ def procesar_compilado(respuestas, datos):
         try:
             schema = schema_segmentador(RUTA_ODS)
             contexto = CONTEXTO_SEGMENTADOR + ods_string(RUTA_ODS)
-            archivo_nube = CLIENTE.files.upload(file=ruta_temp_compilado)
+            archivo_nube = subir_archivo(ruta_temp_compilado)
             respuesta_seg = ia_inspector(archivo_nube, "Segmenta este PDF.", contexto, schema, MODELO_FLASH)
-            try:
-                CLIENTE.files.delete(name=archivo_nube.name)
-            except Exception:
-                pass
+            eliminar_archivo(archivo_nube.name)
             respuestas_seg.append(respuesta_seg)
 
             segmentos = json.loads(respuesta_seg[0])["segmentos"]
@@ -519,79 +540,146 @@ def procesar_compilado(respuestas, datos):
 
 
 def operacion_dir(lista_carpetas):
-    """Recorre cada carpeta, clasifica sus archivos, y reprocesa los compilados que aparezcan."""
+    """Recorre cada carpeta con checkpointing: salta completadas, aísla fallos, registra progreso."""
 
     global CONTEO_ARCHIVOS, CONTEO_DIR
 
-    for carpeta in lista_carpetas:
-        CONTEO_DIR += 1
-        id_sujeto, sujeto, entidad = obtener_id(carpeta)
-        cliente = carpeta.parent.name
-        asesor  = carpeta.parent.parent.name
-        nombre_contratado = sujeto[len(id_sujeto):].strip() if id_sujeto and sujeto.startswith(id_sujeto) else sujeto
-        if not nombre_contratado:
-            nombre_contratado = sujeto
+    estado = EstadoLote(OUTPUT_JSON)
 
-        carpeta_salida = OUTPUT_JSON / id_sujeto
-        carpeta_salida.mkdir(parents=True, exist_ok=True)
+    try:
+        for carpeta in lista_carpetas:
+            clave = carpeta.name
 
-        datos = {
-            "id": id_sujeto,
-            "sujeto": sujeto,
-            "nombre_contratado": nombre_contratado,
-            "entidad": entidad,
-            "cliente": cliente,
-            "asesor": asesor,
-            "carpeta": carpeta,
-            "salida": carpeta_salida,
-        }
+            # ── Saltar carpetas ya procesadas ──
+            if estado.ya_completado(clave):
+                log.info(f"⏭ Saltando (ya completado): {clave}")
+                continue
 
-        desbloquear_pdfs(carpeta, clave=id_sujeto)
-        ruta_archivos = get_archivos(carpeta, FORMATOS)
-        CONTEO_ARCHIVOS += len(ruta_archivos)
+            estado.marcar_en_proceso(clave)
+            t0 = time.time()
 
-        # --- primera pasada ---
-        peticion_primera = [(ruta, datos) for ruta in ruta_archivos]
-        respuestas = POOL.map(ciclo_archivo, peticion_primera)
+            try:
+                CONTEO_DIR += 1
+                id_sujeto, sujeto, entidad = obtener_id(carpeta)
+                cliente = carpeta.parent.name
+                asesor  = carpeta.parent.parent.name
+                nombre_contratado = sujeto[len(id_sujeto):].strip() if id_sujeto and sujeto.startswith(id_sujeto) else sujeto
+                if not nombre_contratado:
+                    nombre_contratado = sujeto
 
-        # --- segunda pasada ---
-        peticion_segunda, respuestas_seg = procesar_compilado(respuestas, datos)
-        if peticion_segunda:
-            respuestas += POOL.map(ciclo_archivo2, peticion_segunda)
+                carpeta_salida = OUTPUT_JSON / id_sujeto
+                carpeta_salida.mkdir(parents=True, exist_ok=True)
 
-        contar_tokens(respuestas + respuestas_seg)
+                datos = {
+                    "id": id_sujeto,
+                    "sujeto": sujeto,
+                    "nombre_contratado": nombre_contratado,
+                    "entidad": entidad,
+                    "cliente": cliente,
+                    "asesor": asesor,
+                    "carpeta": carpeta,
+                    "salida": carpeta_salida,
+                }
 
-        # --- JSON ecuménico de la carpeta ---
-        ecumenico = {
-            "numero_de_identidad_del_contratado": datos["id"],
-            "nombre_del_contratado":               datos["nombre_contratado"],
-            "ruta_carpeta":                        str(datos["carpeta"]),
-            "cliente":                             datos["cliente"],
-            "asesor":                              datos["asesor"],
-        }
-        (carpeta_salida / "0_ecumenico.json").write_text(
-            json.dumps(ecumenico, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+                desbloquear_pdfs(carpeta, clave=id_sujeto)
+                ruta_archivos = get_archivos(carpeta, FORMATOS)
+                CONTEO_ARCHIVOS += len(ruta_archivos)
 
-    POOL.close()
-    POOL.join()
+                log.info(f"▶ [{CONTEO_DIR}/{len(lista_carpetas)}] {clave} ({len(ruta_archivos)} archivos)")
+
+                # --- primera pasada ---
+                peticion_primera = [(ruta, datos) for ruta in ruta_archivos]
+                respuestas_raw = POOL.map(ciclo_archivo, peticion_primera)
+                archivos_fallidos = sum(1 for r in respuestas_raw if r is None)
+                respuestas = [r for r in respuestas_raw if r is not None]
+
+                # --- segunda pasada (compilados) ---
+                peticion_segunda, respuestas_seg = procesar_compilado(respuestas, datos)
+                if peticion_segunda:
+                    respuestas_comp = POOL.map(ciclo_archivo2, peticion_segunda)
+                    archivos_fallidos += sum(1 for r in respuestas_comp if r is None)
+                    respuestas += [r for r in respuestas_comp if r is not None]
+
+                contar_tokens(respuestas + respuestas_seg)
+
+                # --- JSON ecuménico de la carpeta ---
+                ecumenico = {
+                    "numero_de_identidad_del_contratado": datos["id"],
+                    "nombre_del_contratado":               datos["nombre_contratado"],
+                    "ruta_carpeta":                        str(datos["carpeta"]),
+                    "cliente":                             datos["cliente"],
+                    "asesor":                              datos["asesor"],
+                }
+                (carpeta_salida / "0_ecumenico.json").write_text(
+                    json.dumps(ecumenico, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+
+                if archivos_fallidos:
+                    log.warning(f"⚠ {clave}: {archivos_fallidos} archivo(s) fallaron")
+
+                estado.marcar_completado(clave, archivos=len(ruta_archivos) - archivos_fallidos)
+                log.debug(f"  Tiempo: {time.time() - t0:.1f}s")
+
+            except KeyboardInterrupt:
+                estado.marcar_fallido(clave, "Interrumpido por el usuario")
+                log.warning(f"⚠ Interrumpido durante: {clave}")
+                raise
+
+            except Exception as e:
+                estado.marcar_fallido(clave, e)
+                log.error(f"✗ Carpeta falló: {clave} → {e}", exc_info=True)
+                continue
+
+    finally:
+        POOL.close()
+        POOL.join()
+
+    # ── Resumen final ──
+    completados, fallidos, total = estado.resumen()
+    log.info(f"═══ Lote finalizado: {completados} completados, {fallidos} fallidos, {total} total ═══")
+    if fallidos:
+        log.warning(f"Carpetas fallidas: {estado.listar_fallidos()}")
 
 
 #--------------------------EJECUCIÓN----------------
 
-# ┌─────────────────────────────────────────────────────────────┐
-# │ MODO PRUEBA: una carpeta específica (RUTA_PRUEBA en config) │
-# └─────────────────────────────────────────────────────────────┘
-operacion_dir([RUTA_PRUEBA])
+MODO = sys.argv[1].lower() if len(sys.argv) > 1 else "prueba"
 
-# ┌─────────────────────────────────────────────────────────────┐
-# │ MODO COMPLETO: todas las carpetas bajo RUTA_PADRE           │
-# │ Descomentar estas 2 líneas y comentar la de arriba.         │
-# └─────────────────────────────────────────────────────────────┘
-# carpetas = []; buscar_dir(RUTA_PADRE, carpetas); operacion_dir(carpetas)
+if MODO in ("--help", "-h", "help", "ayuda"):
+    print("""
+Uso: python script_v2.py [MODO]
 
-print(f"cantidad carpetas : {CONTEO_DIR}")
-print(f"cantidad archivos : {CONTEO_ARCHIVOS}")
-print(f"total tokens input: {CONTEO_TOKENS_IN}")
-print(f"total tokens output: {CONTEO_TOKENS_OUT}")
-print(f"total tokens total: {CONTEO_TOKENS_ALL}")
+Modos disponibles:
+  prueba     - Ejecuta el proceso en la carpeta de pruebas configurada (RUTA_PRUEBA). (Por defecto)
+  lote       - Procesa todas las carpetas dentro de RUTA_PADRE con checkpointing (salta las ya completadas).
+  reintentar - Limpia el estado de las carpetas marcadas como FALLIDO en el lote y reejecuta el lote.
+
+Ejemplos:
+  python script_v2.py prueba
+  python script_v2.py lote
+  python script_v2.py reintentar
+""")
+    sys.exit(0)
+
+if MODO == "reintentar":
+    log.info("♻ Limpiando carpetas fallidas para reprocesamiento…")
+    _estado_tmp = EstadoLote(OUTPUT_JSON)
+    _estado_tmp.limpiar_fallidos()
+    MODO = "lote"
+
+if MODO == "lote":
+    log.info(f"═══ Inicio lote completo: {RUTA_PADRE} ═══")
+    carpetas = []
+    buscar_dir(RUTA_PADRE, carpetas)
+    log.info(f"Carpetas encontradas: {len(carpetas)}")
+    operacion_dir(carpetas)
+else:
+    log.info(f"═══ Modo prueba: {RUTA_PRUEBA} ═══")
+    operacion_dir([RUTA_PRUEBA])
+
+log.info(f"cantidad carpetas  : {CONTEO_DIR}")
+log.info(f"cantidad archivos  : {CONTEO_ARCHIVOS}")
+log.info(f"total tokens input : {CONTEO_TOKENS_IN}")
+log.info(f"total tokens output: {CONTEO_TOKENS_OUT}")
+log.info(f"total tokens total : {CONTEO_TOKENS_ALL}")
+
