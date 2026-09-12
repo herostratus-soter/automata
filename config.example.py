@@ -25,9 +25,13 @@ MES  = "09"
 RUTA_ODS = Path(__file__).parent / "reglas_v2.ods"
 
 # Directorio raíz con TODAS las carpetas de contratados (para procesamiento completo)
+# En Windows puedes usar raw strings (r"C:\...") o barras normales ("C:/..."):
+# RUTA_PADRE = Path(r"C:\Mis Carpetas\Contratados con ñ\SERGIO_CRUZ")
+# RUTA_PADRE = Path("C:/Mis Carpetas/Contratados con ñ/SERGIO_CRUZ")
 RUTA_PADRE = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/SERGIO_CRUZ/")
 
 # Una carpeta específica para hacer pruebas localizadas
+# RUTA_PRUEBA = Path(r"C:\Mis Carpetas\Contratados con ñ\SERGIO_CRUZ\TIGO\39576253 GUZMAN PAEZ CARMENZA")
 RUTA_PRUEBA = Path("/home/real_home/videodrome_estudio/desarrollo/tmp_automatizacion/TEMP/SERGIO_CRUZ/TIGO/39576253 GUZMAN PAEZ CARMENZA/")
 
 # Donde se guardan los JSONs de cada contratado (una subcarpeta por cédula)

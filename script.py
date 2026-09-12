@@ -38,7 +38,7 @@ from config import (
     RUTA_LOGS, MAX_REINTENTOS, ESPERA_BASE,
 )
 
-from robustez import reintentar, EstadoLote, configurar_logs
+from logs import reintentar, EstadoLote, configurar_logs
 
 
 #--------------------------CONFIGURACIÓN----------------
@@ -285,12 +285,18 @@ def ia_inspector(archivo_nube, prompt, contexto, schema, modelo):
         "response_schema": schema,
     }
     response = CLIENTE.models.generate_content(model=modelo, contents=[archivo_nube, prompt], config=config)
+    meta = getattr(response, "usage_metadata", None)
+    prompt_tokens = (getattr(meta, "prompt_token_count", 0) or 0) if meta else 0
+    candidates_tokens = (getattr(meta, "candidates_token_count", 0) or 0) if meta else 0
+    total_tokens = (getattr(meta, "total_token_count", 0) or 0) if meta else 0
+    cached_tokens = (getattr(meta, "cached_content_token_count", 0) or 0) if meta else 0
+
     return [
         response.text,
-        response.usage_metadata.prompt_token_count,
-        response.usage_metadata.candidates_token_count,
-        response.usage_metadata.total_token_count,
-        (response.usage_metadata.cached_content_token_count or 0),
+        prompt_tokens,
+        candidates_tokens,
+        total_tokens,
+        cached_tokens,
     ]
 
 
@@ -313,10 +319,11 @@ def contar_tokens(respuestas):
 
     global CONTEO_TOKENS_IN, CONTEO_TOKENS_OUT, CONTEO_TOKENS_ALL, CONTEO_TOKENS_CACHE
     for res in respuestas:
-        CONTEO_TOKENS_IN += res[1]
-        CONTEO_TOKENS_OUT += res[2]
-        CONTEO_TOKENS_ALL += res[3]
-        CONTEO_TOKENS_CACHE += (res[4] or 0)
+        if res and len(res) >= 5:
+            CONTEO_TOKENS_IN += (res[1] or 0)
+            CONTEO_TOKENS_OUT += (res[2] or 0)
+            CONTEO_TOKENS_ALL += (res[3] or 0)
+            CONTEO_TOKENS_CACHE += (res[4] or 0)
 
 
 #--------------------------ARCHIVOS Y CARPETAS----------------
@@ -402,7 +409,13 @@ def _guardar_json(resultado, datos_sujeto):
 
 def _sumar_tokens(r1, r2):
     """Suma los conteos de tokens de dos respuestas de la IA."""
-    return [r1[0], r1[1] + r2[1], r1[2] + r2[2], r1[3] + r2[3], (r1[4] or 0) + (r2[4] or 0)]
+    return [
+        r1[0],
+        (r1[1] or 0) + (r2[1] or 0),
+        (r1[2] or 0) + (r2[2] or 0),
+        (r1[3] or 0) + (r2[3] or 0),
+        (r1[4] or 0) + (r2[4] or 0),
+    ]
 
 
 def ciclo_archivo(peticion_archivo):
