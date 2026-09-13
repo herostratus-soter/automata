@@ -51,8 +51,10 @@ FORMATOS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".heic", ".tif", ".tiff", 
 HILOS = 7
 
 
-# ─── Resiliencia ───
+# ─── Control de Lote y Resiliencia ───
 
+MAX_CARPETAS = 0   # 0 = sin límite (procesa todo el lote). N > 0 procesa máximo N carpetas por corrida.
 RUTA_LOGS = Path(__file__).parent / "logs"
 MAX_REINTENTOS = 5
 ESPERA_BASE = 2.0  # segundos (backoff: 2s, 4s, 8s, 16s, 32s)
+

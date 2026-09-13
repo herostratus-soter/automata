@@ -1,12 +1,10 @@
 """
-robustez.py — Capa de resiliencia para el procesamiento masivo de carpetas.
+logs.py — Capa de resiliencia y logging para el procesamiento masivo de carpetas.
 
-Tres componentes independientes que se importan desde script_v2.py:
-  • reintentar():      decorador con exponential backoff para llamadas a la API
-  • EstadoLote:        checkpointing persistente para reanudar ejecuciones interrumpidas
-  • configurar_logs(): logging estructurado a archivos y consola
-
-No modifica la lógica de clasificación ni las reglas de negocio.
+Componentes principales:
+  - reintentar(): decorador con exponential backoff para llamadas a la API
+  - EstadoLote: checklist persistente para monitorear el progreso en estado_lote.json
+  - configurar_logs(): logging estructurado a archivos y consola
 """
 
 import time
@@ -17,9 +15,19 @@ from pathlib import Path
 from datetime import datetime
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # LOGGING
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
+
+
+class AutoFlushFileHandler(logging.FileHandler):
+    """FileHandler que fuerza el flush inmediato a disco tras escribir cada mensaje.
+
+    Garantiza que no se pierdan logs si Colab o el proceso se interrumpe abruptamente.
+    """
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
 
 
 def configurar_logs(directorio_logs):
@@ -27,7 +35,7 @@ def configurar_logs(directorio_logs):
 
       - ejecucion.log : registro completo (DEBUG+)
       - errores.log   : solo advertencias y errores (WARNING+)
-      - consola        : información resumida (INFO+)
+      - consola       : información resumida (INFO+)
 
     Retorna el logger configurado. Idempotente (no duplica handlers).
     """
@@ -40,17 +48,17 @@ def configurar_logs(directorio_logs):
     logger.setLevel(logging.DEBUG)
 
     fmt = logging.Formatter(
-        "%(asctime)s │ %(levelname)-8s │ %(message)s",
+        "%(asctime)s | %(levelname)-8s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Registro completo → ejecucion.log
-    h_todo = logging.FileHandler(directorio_logs / "ejecucion.log", encoding="utf-8")
+    # Registro completo -> ejecucion.log (flush inmediato)
+    h_todo = AutoFlushFileHandler(directorio_logs / "ejecucion.log", encoding="utf-8")
     h_todo.setLevel(logging.DEBUG)
     h_todo.setFormatter(fmt)
 
-    # Solo errores → errores.log
-    h_err = logging.FileHandler(directorio_logs / "errores.log", encoding="utf-8")
+    # Solo errores -> errores.log (flush inmediato)
+    h_err = AutoFlushFileHandler(directorio_logs / "errores.log", encoding="utf-8")
     h_err.setLevel(logging.WARNING)
     h_err.setFormatter(fmt)
 
@@ -66,9 +74,9 @@ def configurar_logs(directorio_logs):
     return logger
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # RETRY CON EXPONENTIAL BACKOFF
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 
 _PATRONES_REINTENTABLES = (
@@ -103,7 +111,7 @@ def _es_reintentable(excepcion):
 def reintentar(max_intentos=5, base_espera=2.0):
     """Decorador: reintenta la función ante fallos transitorios con backoff exponencial.
 
-    Esperas: base × 2^(intento-1) → con base=2: 2s, 4s, 8s, 16s, 32s.
+    Esperas: base * 2^(intento-1) -> con base=2: 2s, 4s, 8s, 16s, 32s.
     Solo reintenta errores de red, cuota (429) y servidor (5xx).
     """
     def decorador(fn):
@@ -117,33 +125,43 @@ def reintentar(max_intentos=5, base_espera=2.0):
                     if not _es_reintentable(e) or intento == max_intentos:
                         if intento > 1:
                             logger.error(
-                                f"✗ {fn.__name__} falló definitivamente "
+                                f"[ERROR] {fn.__name__} fallo definitivamente "
                                 f"(intento {intento}/{max_intentos}): {e}"
                             )
                         raise
                     espera = base_espera * (2 ** (intento - 1))
                     logger.warning(
-                        f"⟳ {fn.__name__} intento {intento}/{max_intentos} falló "
-                        f"({type(e).__name__}). Reintentando en {espera:.0f}s…"
+                        f"[RETRY] {fn.__name__} intento {intento}/{max_intentos} fallo "
+                        f"({type(e).__name__}). Reintentando en {espera:.0f}s..."
                     )
                     time.sleep(espera)
         return wrapper
     return decorador
 
 
-# ═══════════════════════════════════════════════════════════════
-# ESTADO DEL LOTE (CHECKPOINTING)
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
+# CHECKLIST Y ESTADO DEL LOTE (RETROCOMPATIBLE)
+# ===============================================================
 
 
 class EstadoLote:
-    """Registro persistente del progreso de un lote de carpetas.
+    """Checklist y registro persistente del lote de carpetas.
 
     Archivo: <directorio_salida>/estado_lote.json
 
-    Estados posibles: PENDIENTE → EN_PROCESO → COMPLETADO | FALLIDO
-
-    Permite reanudar ejecuciones interrumpidas saltando carpetas ya completadas.
+    Estructura retrocompatible:
+    {
+      "52344909 ANGARITA FORERO MARISOL": {
+        "estado": "COMPLETADO",
+        "fecha": "2026-09-12T23:49:07",
+        "archivos": 26
+      },
+      "1096230492 ALVARINO GARCIA ELIDA": {
+        "estado": "FALLIDO",
+        "fecha": "2026-09-13T00:46:40",
+        "error": "Sequence index out of range"
+      }
+    }
     """
 
     ARCHIVO = "estado_lote.json"
@@ -155,8 +173,11 @@ class EstadoLote:
 
     def _cargar(self):
         if self.ruta.exists():
-            with open(self.ruta, encoding="utf-8") as f:
-                return json.load(f)
+            try:
+                with open(self.ruta, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
         return {}
 
     def _guardar(self):
@@ -164,49 +185,91 @@ class EstadoLote:
             json.dumps(self.datos, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+    def inicializar_checklist(self, lista_carpetas):
+        """Registra al inicio todas las carpetas del lote como PENDIENTE si no existen aun."""
+        modificado = False
+        for carpeta in lista_carpetas:
+            clave = carpeta.name if isinstance(carpeta, Path) else Path(carpeta).name
+            if clave not in self.datos:
+                self.datos[clave] = {
+                    "estado": "PENDIENTE",
+                    "archivos": 0
+                }
+                modificado = True
+        if modificado:
+            self._guardar()
+
+    @staticmethod
+    def contar_jsons_reales(carpeta_salida):
+        """Cuenta la cantidad real de archivos .json generados en disco (excluyendo 0_ecumenico.json)."""
+        carpeta = Path(carpeta_salida)
+        if not carpeta.exists() or not carpeta.is_dir():
+            return 0
+        conteo = 0
+        for archivo in carpeta.glob("*.json"):
+            if not (archivo.name.startswith("_") or archivo.name.startswith("0_")):
+                conteo += 1
+        return conteo
+
     def ya_completado(self, clave):
-        """True si la carpeta fue procesada exitosamente en una ejecución anterior."""
-        return self.datos.get(clave, {}).get("estado") == "COMPLETADO"
+        """True si la carpeta ya fue procesada exitosamente (COMPLETADO o APROBADO)."""
+        estado = self.datos.get(clave, {}).get("estado")
+        return estado in ("COMPLETADO", "APROBADO")
 
     def marcar_en_proceso(self, clave):
-        self.datos[clave] = {
-            "estado": "EN_PROCESO",
-            "inicio": datetime.now().isoformat(timespec="seconds"),
-        }
+        if clave not in self.datos:
+            self.datos[clave] = {}
+        self.datos[clave]["estado"] = "EN_PROCESO"
+        self.datos[clave]["inicio"] = datetime.now().isoformat(timespec="seconds")
         self._guardar()
 
-    def marcar_completado(self, clave, archivos=0):
-        self.datos[clave] = {
-            "estado": "COMPLETADO",
-            "fecha": datetime.now().isoformat(timespec="seconds"),
-            "archivos": archivos,
-        }
-        self._guardar()
-        self.logger.info(f"  ✓ Completado ({archivos} archivos)")
+    def marcar_completado(self, clave, carpeta_salida):
+        """Revisa la carpeta de salida real. Si genero al menos 1 JSON, marca COMPLETADO. De lo contrario, FALLIDO."""
+        jsons_reales = self.contar_jsons_reales(carpeta_salida)
+        if jsons_reales > 0:
+            self.datos[clave] = {
+                "estado": "COMPLETADO",
+                "fecha": datetime.now().isoformat(timespec="seconds"),
+                "archivos": jsons_reales
+            }
+            self._guardar()
+            self.logger.info(f"  [OK] COMPLETADO ({jsons_reales} archivos JSON generados)")
+        else:
+            self.marcar_defectuoso(clave, "0 archivos JSON generados en la carpeta de salida", carpeta_salida)
 
-    def marcar_fallido(self, clave, error):
+    def marcar_defectuoso(self, clave, motivo, carpeta_salida=None):
+        jsons_reales = self.contar_jsons_reales(carpeta_salida) if carpeta_salida else 0
         self.datos[clave] = {
             "estado": "FALLIDO",
             "fecha": datetime.now().isoformat(timespec="seconds"),
-            "error": str(error)[:500],
+            "error": str(motivo)[:500],
+            "archivos": jsons_reales
         }
         self._guardar()
+        self.logger.warning(f"  [DEFECTUOSO] {clave} -> {motivo}")
 
-    def resumen(self):
-        """Retorna (completados, fallidos, total)."""
-        completados = sum(1 for v in self.datos.values() if v.get("estado") == "COMPLETADO")
-        fallidos = sum(1 for v in self.datos.values() if v.get("estado") == "FALLIDO")
-        return completados, fallidos, len(self.datos)
+    def marcar_fallido(self, clave, error, carpeta_salida=None):
+        self.marcar_defectuoso(clave, error, carpeta_salida)
 
     def listar_fallidos(self):
-        """Retorna las claves de las carpetas con estado FALLIDO."""
-        return [k for k, v in self.datos.items() if v.get("estado") == "FALLIDO"]
+        """Devuelve las claves de las carpetas que quedaron con estado FALLIDO o DEFECTUOSO."""
+        return [k for k, v in self.datos.items() if v.get("estado") in ("FALLIDO", "DEFECTUOSO")]
 
     def limpiar_fallidos(self):
-        """Elimina las entradas FALLIDO para permitir su reprocesamiento."""
+        """Limpia las entradas defectuosas para que el modo reintentar las vuelva a procesar."""
         fallidos = self.listar_fallidos()
         for clave in fallidos:
-            del self.datos[clave]
+            self.datos[clave] = {
+                "estado": "PENDIENTE",
+                "archivos": 0
+            }
         self._guardar()
-        self.logger.info(f"♻ {len(fallidos)} carpetas fallidas marcadas para reprocesamiento")
+        self.logger.info(f"[REINTENTAR] {len(fallidos)} carpetas defectuosas marcadas para reprocesamiento")
         return len(fallidos)
+
+    def resumen(self):
+        """Retorna (completados, fallidos, pendientes, total)."""
+        completados = sum(1 for v in self.datos.values() if v.get("estado") in ("COMPLETADO", "APROBADO"))
+        fallidos = sum(1 for v in self.datos.values() if v.get("estado") in ("FALLIDO", "DEFECTUOSO"))
+        pendientes = sum(1 for v in self.datos.values() if v.get("estado") in ("PENDIENTE", "EN_PROCESO"))
+        return completados, fallidos, pendientes, len(self.datos)

@@ -89,24 +89,34 @@ def construir_leyenda(catalogo):
     return pd.DataFrame(filas)
 
 
+from logs import EstadoLote
+
+
 #--------------------------LECTURA DE RESULTADOS (JSONs)----------------
 
 
 def leer_jsons_contratado(carpeta_contratado):
     """Lee todos los JSONs de un contratado y los agrupa por tipo de documento.
 
-    Retorna: { "documento_id": [json1], "referencia_laboral": [json1, json2], ... }
+    Retorna: (por_tipo_dict, conteo_corruptos)
     """
 
     por_tipo = {}
+    corruptos = 0
     for archivo in sorted(Path(carpeta_contratado).glob("*.json")):
         if archivo.name.startswith("_") or archivo.name.startswith("0_"):
             continue  # saltar 0_ecumenico.json y similares
-        with open(archivo, encoding="utf-8") as f:
-            datos = json.load(f)
-        tipo = datos["tipo_documento"]
-        por_tipo.setdefault(tipo, []).append(datos)
-    return por_tipo
+        try:
+            with open(archivo, encoding="utf-8") as f:
+                datos = json.load(f)
+            tipo = datos.get("tipo_documento")
+            if tipo:
+                por_tipo.setdefault(tipo, []).append(datos)
+        except Exception as e:
+            corruptos += 1
+            print(f"[ADVERTENCIA] JSON corrupto o ilegible en {archivo.name} ({carpeta_contratado.name}): {e}")
+            continue
+    return por_tipo, corruptos
 
 
 def elegir_mejor(lista_jsons):
@@ -122,12 +132,15 @@ def elegir_mejor(lista_jsons):
 
 
 def leer_ecumenico(carpeta_contratado):
-    """Lee 0_ecumenico.json de la carpeta del contratado. Devuelve {} si no existe."""
+    """Lee 0_ecumenico.json de la carpeta del contratado. Devuelve {} si no existe o está dañado."""
     ruta = Path(carpeta_contratado) / "0_ecumenico.json"
     if not ruta.exists():
         return {}
-    with open(ruta, encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(ruta, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def extraer_info_contratado(por_tipo, carpeta_name):
@@ -144,7 +157,7 @@ def construir_fila(id_contratado, carpeta_contratado, por_tipo, catalogo, column
     """Arma una fila del Excel para un contratado.
 
     Los JSONs son planos: cada id_requisito es un campo al mismo nivel que tipo_documento.
-    El catálogo dice qué id_requisitos tiene cada tipo → simplemente se leen del JSON.
+    El catálogo dice qué id_requisitos tiene cada tipo -> simplemente se leen del JSON.
     """
 
     eco = leer_ecumenico(carpeta_contratado)
@@ -190,6 +203,13 @@ def construir_fila(id_contratado, carpeta_contratado, por_tipo, catalogo, column
 def consolidar():
     """Lee JSONs de tmp/, actualiza/inserta filas en el Excel sin borrar las previas."""
 
+    print("==================================================")
+    print(" CONSOLIDADOR DE EXCEL - AUTOMATA")
+    print("==================================================")
+
+    estado_lote = EstadoLote(RUTA_SALIDA_JSON)
+
+    print(f"[INFO] Leyendo catalogo desde: {RUTA_ODS.name}")
     catalogo = leer_catalogo(RUTA_ODS)
     columnas = construir_columnas(catalogo)
     leyenda  = construir_leyenda(catalogo)
@@ -198,23 +218,44 @@ def consolidar():
     filas_existentes = {}  # { num_id: fila_dict }
     col_id = "numero de identidad del contratado"
     if RUTA_EXCEL.exists():
+        print(f"[INFO] Cargando Excel anterior: {RUTA_EXCEL.name}")
         df_prev = pd.read_excel(RUTA_EXCEL, sheet_name="contratados", dtype=str)
         key_col = col_id if col_id in df_prev.columns else ("id" if "id" in df_prev.columns else df_prev.columns[0])
         for _, row in df_prev.iterrows():
             key = str(row[key_col])
             filas_existentes[key] = row.to_dict()
 
-    # Procesar cada subcarpeta de tmp/
-    for carpeta in sorted(RUTA_SALIDA_JSON.iterdir()):
-        if not carpeta.is_dir():
-            continue
-        por_tipo = leer_jsons_contratado(carpeta)
+    print(f"[INFO] Escaneando carpetas de salida en: {RUTA_SALIDA_JSON}")
+    carpetas_salida = [c for c in sorted(RUTA_SALIDA_JSON.iterdir()) if c.is_dir()]
+    total_carpetas = len(carpetas_salida)
+
+    print(f"[INFO] Carpetas encontradas para consolidar: {total_carpetas}")
+    print("--------------------------------------------------")
+
+    for i, carpeta in enumerate(carpetas_salida, 1):
+        por_tipo, corruptos = leer_jsons_contratado(carpeta)
         eco_existe = (carpeta / "0_ecumenico.json").exists()
+        
+        # Conteo de JSONs de documentos (sin contar el ecuménico)
+        cant_jsons = sum(len(v) for v in por_tipo.values())
+        
+        if corruptos > 0:
+            estado_lote.marcar_defectuoso(
+                carpeta.name,
+                f"JSON corrupto o ilegible detectado en constructor ({corruptos} error/es)",
+                carpeta
+            )
+
         if not por_tipo and not eco_existe:
+            print(f"[SALTAR] [{i}/{total_carpetas}] {carpeta.name} -> Vacia (0 JSONs), saltando.")
             continue
+        
+        print(f"[PROCESANDO] [{i}/{total_carpetas}] {carpeta.name} ({cant_jsons} JSONs de documentos)")
+
         fila = construir_fila(carpeta.name, carpeta, por_tipo, catalogo, columnas)
         id_key = str(fila["numero de identidad del contratado"])
         filas_existentes[id_key] = fila  # sobreescribe o añade este contratado
+
 
     # Reconstruir DataFrame respetando el orden de columnas actual
     todas = list(filas_existentes.values())
@@ -223,22 +264,27 @@ def consolidar():
     # Convertir a numérico si los IDs son enteros pura cifra (elimina la comilla "'" en Excel)
     if col_id in df.columns:
         s = df[col_id].astype(str)
-        # Si todos los IDs válidos son numéricos y no empiezan con cero (salvo "0" solo), convertir a entero
         es_num = s.str.isdigit()
         no_cero_inicial = ~s.str.startswith("0") | (s == "0")
         if (es_num & no_cero_inicial).all():
             df[col_id] = pd.to_numeric(df[col_id], errors="coerce").astype("Int64")
 
+    print("--------------------------------------------------")
+    print(f"[INFO] Guardando Excel final en: {RUTA_EXCEL}")
     with pd.ExcelWriter(RUTA_EXCEL, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="contratados", index=False)
         leyenda.to_excel(writer, sheet_name="leyenda", index=False)
 
-    print(f"✓ Excel actualizado: {RUTA_EXCEL}")
-    print(f"  {len(todas)} contratados totales ({len(filas_existentes)} en registro)")
-    print(f"  {len(columnas)} columnas")
+    print("==================================================")
+    print(f"[OK] Excel actualizado exitosamente!")
+    print(f"  - Total contratados en Excel: {len(todas)}")
+    print(f"  - Total columnas generadas : {len(columnas)}")
+    print("==================================================")
+
 
 
 #--------------------------EJECUCIÓN----------------
 
 if __name__ == "__main__":
     consolidar()
+

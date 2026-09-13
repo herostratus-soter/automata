@@ -34,7 +34,7 @@ from multiprocessing.dummy import Pool as ThreadPool
 from config import (
     APIKEY, MODELO_FLASH, MODELO_LITE,
     RUTA_ODS, RUTA_SALIDA_JSON, RUTA_PRUEBA, RUTA_PADRE,
-    FORMATOS, HILOS,
+    FORMATOS, HILOS, MAX_CARPETAS,
     RUTA_LOGS, MAX_REINTENTOS, ESPERA_BASE,
 )
 
@@ -452,7 +452,7 @@ def ciclo_archivo(peticion_archivo):
         return [resultado] + respuesta_final[1:]
 
     except Exception as e:
-        log.error(f"✗ Archivo falló: {ruta_original.name} → {e}")
+        log.error(f"[ERROR] Archivo fallo: {ruta_original.name} -> {e}")
         return None
 
     finally:
@@ -489,7 +489,7 @@ def ciclo_archivo2(peticion):
         return [resultado] + respuesta_final[1:]
 
     except Exception as e:
-        log.error(f"✗ Segmento falló: {ruta_compilado_original.name} ({rango}) → {e}")
+        log.error(f"[ERROR] Segmento fallo: {ruta_compilado_original.name} ({rango}) -> {e}")
         return None
 
     finally:
@@ -553,35 +553,44 @@ def procesar_compilado(respuestas, datos):
 
 
 def operacion_dir(lista_carpetas):
-    """Recorre cada carpeta con checkpointing: salta completadas, aísla fallos, registra progreso."""
+    """Recorre cada carpeta del lote actualizando el checklist y respetando MAX_CARPETAS."""
 
     global CONTEO_ARCHIVOS, CONTEO_DIR
 
     estado = EstadoLote(OUTPUT_JSON)
+    estado.inicializar_checklist(lista_carpetas)
+
+    procesadas_en_corrida = 0
 
     try:
         for carpeta in lista_carpetas:
             clave = carpeta.name
 
-            # ── Saltar carpetas ya procesadas ──
+            # ── Saltar carpetas ya aprobadas ──
             if estado.ya_completado(clave):
-                log.info(f"⏭ Saltando (ya completado): {clave}")
+                log.info(f"[SALTAR] Ya APROBADO: {clave}")
                 continue
+
+            # ── Verificar límite máximo por corrida ──
+            if MAX_CARPETAS and MAX_CARPETAS > 0 and procesadas_en_corrida >= MAX_CARPETAS:
+                log.info(f"[DETENIDO] Limite de {MAX_CARPETAS} carpetas por corrida alcanzado (MAX_CARPETAS={MAX_CARPETAS}). Deteniendo.")
+                break
 
             estado.marcar_en_proceso(clave)
             t0 = time.time()
+            id_sujeto, sujeto, entidad = obtener_id(carpeta)
+            carpeta_salida = OUTPUT_JSON / id_sujeto
+            carpeta_salida.mkdir(parents=True, exist_ok=True)
 
             try:
                 CONTEO_DIR += 1
-                id_sujeto, sujeto, entidad = obtener_id(carpeta)
+                procesadas_en_corrida += 1
+
                 cliente = carpeta.parent.name
                 asesor  = carpeta.parent.parent.name
                 nombre_contratado = sujeto[len(id_sujeto):].strip() if id_sujeto and sujeto.startswith(id_sujeto) else sujeto
                 if not nombre_contratado:
                     nombre_contratado = sujeto
-
-                carpeta_salida = OUTPUT_JSON / id_sujeto
-                carpeta_salida.mkdir(parents=True, exist_ok=True)
 
                 datos = {
                     "id": id_sujeto,
@@ -598,7 +607,7 @@ def operacion_dir(lista_carpetas):
                 ruta_archivos = get_archivos(carpeta, FORMATOS)
                 CONTEO_ARCHIVOS += len(ruta_archivos)
 
-                log.info(f"▶ [{CONTEO_DIR}/{len(lista_carpetas)}] {clave} ({len(ruta_archivos)} archivos)")
+                log.info(f"[PROCESANDO] [{CONTEO_DIR}/{len(lista_carpetas)}] {clave} ({len(ruta_archivos)} archivos de entrada)")
 
                 # --- primera pasada ---
                 peticion_primera = [(ruta, datos) for ruta in ruta_archivos]
@@ -628,19 +637,20 @@ def operacion_dir(lista_carpetas):
                 )
 
                 if archivos_fallidos:
-                    log.warning(f"⚠ {clave}: {archivos_fallidos} archivo(s) fallaron")
+                    log.warning(f"[ADVERTENCIA] {clave}: {archivos_fallidos} archivo(s) fallaron durante la IA")
 
-                estado.marcar_completado(clave, archivos=len(ruta_archivos) - archivos_fallidos)
+                # Conteo real en disco + calificación APROBADO o DEFECTUOSO
+                estado.marcar_completado(clave, carpeta_salida)
                 log.debug(f"  Tiempo: {time.time() - t0:.1f}s")
 
             except KeyboardInterrupt:
-                estado.marcar_fallido(clave, "Interrumpido por el usuario")
-                log.warning(f"⚠ Interrumpido durante: {clave}")
+                estado.marcar_fallido(clave, "Interrumpido por el usuario", carpeta_salida)
+                log.warning(f"[ADVERTENCIA] Interrumpido durante: {clave}")
                 raise
 
             except Exception as e:
-                estado.marcar_fallido(clave, e)
-                log.error(f"✗ Carpeta falló: {clave} → {e}", exc_info=True)
+                estado.marcar_fallido(clave, e, carpeta_salida)
+                log.error(f"[ERROR] Carpeta fallo: {clave} -> {e}", exc_info=True)
                 continue
 
     finally:
@@ -648,10 +658,10 @@ def operacion_dir(lista_carpetas):
         POOL.join()
 
     # ── Resumen final ──
-    completados, fallidos, total = estado.resumen()
-    log.info(f"═══ Lote finalizado: {completados} completados, {fallidos} fallidos, {total} total ═══")
-    if fallidos:
-        log.warning(f"Carpetas fallidas: {estado.listar_fallidos()}")
+    aprobados, defectuosos, pendientes, total = estado.resumen()
+    log.info(f"=== Lote finalizado: {aprobados} APROBADOS, {defectuosos} DEFECTUOSOS, {pendientes} PENDIENTES, {total} TOTAL ===")
+    if defectuosos:
+        log.warning(f"Carpetas defectuosas: {estado.listar_fallidos()}")
 
 
 #--------------------------EJECUCIÓN----------------
@@ -660,39 +670,56 @@ MODO = sys.argv[1].lower() if len(sys.argv) > 1 else "prueba"
 
 if MODO in ("--help", "-h", "help", "ayuda"):
     print("""
-Uso: python script_v2.py [MODO]
+Uso: python script.py [MODO]
 
 Modos disponibles:
-  prueba     - Ejecuta el proceso en la carpeta de pruebas configurada (RUTA_PRUEBA). (Por defecto)
-  lote       - Procesa todas las carpetas dentro de RUTA_PADRE con checkpointing (salta las ya completadas).
-  reintentar - Limpia el estado de las carpetas marcadas como FALLIDO en el lote y reejecuta el lote.
+  lote       - Procesa todas las carpetas dentro de RUTA_PADRE. Salta las que ya están APROBADAS en estado_lote.json.
+  reintentar - Busca únicamente las carpetas marcadas como DEFECTUOSO en estado_lote.json y las vuelve a procesar.
+  prueba     - Ejecuta un ensayo procesando únicamente las primeras carpetas de prueba.
 
 Ejemplos:
-  python script_v2.py prueba
-  python script_v2.py lote
-  python script_v2.py reintentar
+  python script.py prueba
+  python script.py lote
+  python script.py reintentar
 """)
     sys.exit(0)
 
+carpetas_totales = []
+buscar_dir(RUTA_PADRE, carpetas_totales)
+
 if MODO == "reintentar":
-    log.info("♻ Limpiando carpetas fallidas para reprocesamiento…")
+    log.info("[REINTENTAR] Modo reintentar: buscando carpetas defectuosas...")
     _estado_tmp = EstadoLote(OUTPUT_JSON)
     _estado_tmp.limpiar_fallidos()
-    MODO = "lote"
+    # Filtramos para procesar únicamente las carpetas que eran defectuosas
+    claves_fallidas = set(_estado_tmp.listar_fallidos())
+    carpetas_a_procesar = [c for c in carpetas_totales if c.name in claves_fallidas]
+    if not carpetas_a_procesar:
+        # Si no había lista previa específica, busca todas las no aprobadas
+        carpetas_a_procesar = [c for c in carpetas_totales if not _estado_tmp.ya_completado(c.name)]
+    log.info(f"Carpetas a reintentar: {len(carpetas_a_procesar)}")
+    operacion_dir(carpetas_a_procesar)
 
-if MODO == "lote":
-    log.info(f"═══ Inicio lote completo: {RUTA_PADRE} ═══")
-    carpetas = []
-    buscar_dir(RUTA_PADRE, carpetas)
-    log.info(f"Carpetas encontradas: {len(carpetas)}")
-    operacion_dir(carpetas)
-else:
-    log.info(f"═══ Modo prueba: {RUTA_PRUEBA} ═══")
-    operacion_dir([RUTA_PRUEBA])
+elif MODO == "prueba":
+    log.info("=== Modo prueba ===")
+    if RUTA_PRUEBA.exists() and RUTA_PRUEBA.is_dir():
+        carpetas_prueba = [RUTA_PRUEBA.resolve()]
+    else:
+        limite_prueba = MAX_CARPETAS if (MAX_CARPETAS and MAX_CARPETAS > 0) else 3
+        carpetas_prueba = carpetas_totales[:limite_prueba]
+    log.info(f"Ejecutando prueba en {len(carpetas_prueba)} carpeta(s)")
+    operacion_dir(carpetas_prueba)
 
-log.info(f"cantidad carpetas  : {CONTEO_DIR}")
-log.info(f"cantidad archivos  : {CONTEO_ARCHIVOS}")
-log.info(f"total tokens input : {CONTEO_TOKENS_IN}")
-log.info(f"total tokens output: {CONTEO_TOKENS_OUT}")
-log.info(f"total tokens total : {CONTEO_TOKENS_ALL}")
+else:  # MODO == "lote" o por defecto
+    log.info(f"=== Inicio lote completo: {RUTA_PADRE} ===")
+    log.info(f"Carpetas encontradas: {len(carpetas_totales)}")
+    operacion_dir(carpetas_totales)
+
+
+log.info(f"cantidad carpetas procesadas : {CONTEO_DIR}")
+log.info(f"cantidad archivos analizados : {CONTEO_ARCHIVOS}")
+log.info(f"total tokens input           : {CONTEO_TOKENS_IN}")
+log.info(f"total tokens output          : {CONTEO_TOKENS_OUT}")
+log.info(f"total tokens total           : {CONTEO_TOKENS_ALL}")
+
 
