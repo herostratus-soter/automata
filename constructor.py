@@ -237,12 +237,9 @@ def consolidar():
 
     pool = ThreadPool(num_hilos)
     tareas = [(c, catalogo, columnas) for c in carpetas_salida]
-    resultados = pool.map(_procesar_una_carpeta, tareas)
-    pool.close()
-    pool.join()
 
     procesadas = 0
-    for res in resultados:
+    for res in pool.imap_unordered(_procesar_una_carpeta, tareas):
         if res is None:
             continue
         
@@ -258,6 +255,9 @@ def consolidar():
         id_key = str(fila["numero de identidad del contratado"])
         filas_existentes[id_key] = fila  # sobreescribe o añade este contratado
         print(f"[PROCESANDO] [{procesadas}/{total_carpetas}] {res['clave']} ({res['cant_jsons']} JSONs de documentos)")
+
+    pool.close()
+    pool.join()
 
     # Reconstruir DataFrame respetando el orden de columnas actual
     todas = list(filas_existentes.values())
