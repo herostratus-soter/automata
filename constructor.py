@@ -1,20 +1,11 @@
-"""
-constructor.py — Lee los JSONs de salida y construye/actualiza el Excel de contratación.
-
-Flujo:
-  1. Lee reglas_v2.ods para saber qué tipos existen y qué requerimientos tiene cada uno.
-  2. Arma las columnas del Excel (primeras columnas son la extracción ecuménica).
-  3. Si el Excel ya existe, carga las filas previas — no sobreescribe registros no procesados.
-  4. Por cada subcarpeta en tmp/, lee 0_ecumenico.json + JSONs de documentos.
-  5. Actualiza o inserta la fila del contratado (clave: numero de identidad del contratado).
-  6. Guarda el Excel con la hoja principal más la leyenda.
-"""
-
+import os
 import json
 import pandas as pd
 from pathlib import Path
+from multiprocessing.dummy import Pool as ThreadPool
 
-from config import RUTA_ODS, RUTA_SALIDA_JSON, RUTA_SALIDA_EXCEL, ANIO, MES
+from config import RUTA_ODS, RUTA_SALIDA_JSON, RUTA_SALIDA_EXCEL, ANIO, MES, HILOS
+from logs import EstadoLote
 
 
 #--------------------------CONFIGURACIÓN----------------
@@ -89,34 +80,48 @@ def construir_leyenda(catalogo):
     return pd.DataFrame(filas)
 
 
-from logs import EstadoLote
+#--------------------------LECTURA EN UNA SOLA PASADA (OPTIMIZADA)----------------
 
 
-#--------------------------LECTURA DE RESULTADOS (JSONs)----------------
+def leer_carpeta_contratado(carpeta_contratado):
+    """Lee todos los JSONs de una carpeta en una sola pasada de disco usando os.scandir.
 
-
-def leer_jsons_contratado(carpeta_contratado):
-    """Lee todos los JSONs de un contratado y los agrupa por tipo de documento.
-
-    Retorna: (por_tipo_dict, conteo_corruptos)
+    Retorna: (por_tipo_dict, eco_dict, conteo_corruptos, cant_jsons)
     """
 
     por_tipo = {}
+    eco_dict = {}
     corruptos = 0
-    for archivo in sorted(Path(carpeta_contratado).glob("*.json")):
-        if archivo.name.startswith("_") or archivo.name.startswith("0_"):
-            continue  # saltar 0_ecumenico.json y similares
-        try:
-            with open(archivo, encoding="utf-8") as f:
-                datos = json.load(f)
-            tipo = datos.get("tipo_documento")
-            if tipo:
-                por_tipo.setdefault(tipo, []).append(datos)
-        except Exception as e:
-            corruptos += 1
-            print(f"[ADVERTENCIA] JSON corrupto o ilegible en {archivo.name} ({carpeta_contratado.name}): {e}")
-            continue
-    return por_tipo, corruptos
+    cant_jsons = 0
+
+    try:
+        with os.scandir(carpeta_contratado) as it:
+            archivos_ordenados = sorted(it, key=lambda e: e.name)
+            for entry in archivos_ordenados:
+                if not entry.name.endswith(".json") or entry.name.startswith("_"):
+                    continue
+
+                if entry.name == "0_ecumenico.json":
+                    try:
+                        with open(entry.path, encoding="utf-8") as f:
+                            eco_dict = json.load(f)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        with open(entry.path, encoding="utf-8") as f:
+                            datos = json.load(f)
+                        tipo = datos.get("tipo_documento")
+                        if tipo:
+                            por_tipo.setdefault(tipo, []).append(datos)
+                            cant_jsons += 1
+                    except Exception as e:
+                        corruptos += 1
+                        print(f"[ADVERTENCIA] JSON corrupto o ilegible en {entry.name} ({carpeta_contratado.name}): {e}")
+    except Exception as e:
+        print(f"[ADVERTENCIA] Error leyendo carpeta {carpeta_contratado.name}: {e}")
+
+    return por_tipo, eco_dict, corruptos, cant_jsons
 
 
 def elegir_mejor(lista_jsons):
@@ -126,21 +131,6 @@ def elegir_mejor(lista_jsons):
     Si empatan, se queda con el primero de la lista.
     """
     return max(lista_jsons, key=lambda doc: doc.get("fiabilidad", 0.0))
-
-
-#--------------------------CONSTRUCCIÓN DEL EXCEL----------------
-
-
-def leer_ecumenico(carpeta_contratado):
-    """Lee 0_ecumenico.json de la carpeta del contratado. Devuelve {} si no existe o está dañado."""
-    ruta = Path(carpeta_contratado) / "0_ecumenico.json"
-    if not ruta.exists():
-        return {}
-    try:
-        with open(ruta, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
 
 
 def extraer_info_contratado(por_tipo, carpeta_name):
@@ -153,17 +143,11 @@ def extraer_info_contratado(por_tipo, carpeta_name):
     return id_sujeto, nombre_contratado
 
 
-def construir_fila(id_contratado, carpeta_contratado, por_tipo, catalogo, columnas):
-    """Arma una fila del Excel para un contratado.
+def construir_fila(id_contratado, carpeta_contratado, por_tipo, eco_dict, catalogo, columnas):
+    """Arma una fila del Excel para un contratado sin hacer llamadas adicionales a disco."""
 
-    Los JSONs son planos: cada id_requisito es un campo al mismo nivel que tipo_documento.
-    El catálogo dice qué id_requisitos tiene cada tipo -> simplemente se leen del JSON.
-    """
-
-    eco = leer_ecumenico(carpeta_contratado)
-
-    num_id = eco.get("numero_de_identidad_del_contratado") or eco.get("id") or id_contratado
-    nom_contratado = eco.get("nombre_del_contratado")
+    num_id = eco_dict.get("numero_de_identidad_del_contratado") or eco_dict.get("id") or id_contratado
+    nom_contratado = eco_dict.get("nombre_del_contratado")
 
     if not nom_contratado or not num_id:
         fb_id, fb_nom = extraer_info_contratado(por_tipo, Path(carpeta_contratado).name)
@@ -175,9 +159,9 @@ def construir_fila(id_contratado, carpeta_contratado, por_tipo, catalogo, column
     fila = {col: None for col in columnas}
     fila["numero de identidad del contratado"] = num_id
     fila["nombre del contratado"]               = nom_contratado
-    fila["ruta_carpeta"]                        = eco.get("ruta_carpeta", "")
-    fila["cliente"]                             = eco.get("cliente", "")
-    fila["asesor"]                              = eco.get("asesor", "")
+    fila["ruta_carpeta"]                        = eco_dict.get("ruta_carpeta", "")
+    fila["cliente"]                             = eco_dict.get("cliente", "")
+    fila["asesor"]                              = eco_dict.get("asesor", "")
 
     for id_doc in sorted(catalogo):
         tipo = catalogo[id_doc]["documento"]
@@ -197,11 +181,29 @@ def construir_fila(id_contratado, carpeta_contratado, por_tipo, catalogo, column
     return fila
 
 
+def _procesar_una_carpeta(args):
+    """Procesa una carpeta de forma aislada (ejecutado en paralelo en el ThreadPool)."""
+    carpeta, catalogo, columnas = args
+    por_tipo, eco_dict, corruptos, cant_jsons = leer_carpeta_contratado(carpeta)
+
+    if not por_tipo and not eco_dict:
+        return None
+
+    fila = construir_fila(carpeta.name, carpeta, por_tipo, eco_dict, catalogo, columnas)
+    return {
+        "clave": carpeta.name,
+        "carpeta": carpeta,
+        "fila": fila,
+        "corruptos": corruptos,
+        "cant_jsons": cant_jsons,
+    }
+
+
 #--------------------------ORQUESTACIÓN----------------
 
 
 def consolidar():
-    """Lee JSONs de tmp/, actualiza/inserta filas en el Excel sin borrar las previas."""
+    """Lee JSONs de tmp/, actualiza/inserta filas en el Excel en paralelo sin borrar las previas."""
 
     print("==================================================")
     print(" CONSOLIDADOR DE EXCEL - AUTOMATA")
@@ -229,33 +231,33 @@ def consolidar():
     carpetas_salida = [c for c in sorted(RUTA_SALIDA_JSON.iterdir()) if c.is_dir()]
     total_carpetas = len(carpetas_salida)
 
-    print(f"[INFO] Carpetas encontradas para consolidar: {total_carpetas}")
+    num_hilos = min(HILOS, 16) if (HILOS and HILOS > 0) else 10
+    print(f"[INFO] Carpetas encontradas para consolidar: {total_carpetas} (procesando en paralelo con {num_hilos} hilos)")
     print("--------------------------------------------------")
 
-    for i, carpeta in enumerate(carpetas_salida, 1):
-        por_tipo, corruptos = leer_jsons_contratado(carpeta)
-        eco_existe = (carpeta / "0_ecumenico.json").exists()
-        
-        # Conteo de JSONs de documentos (sin contar el ecuménico)
-        cant_jsons = sum(len(v) for v in por_tipo.values())
-        
-        if corruptos > 0:
-            estado_lote.marcar_defectuoso(
-                carpeta.name,
-                f"JSON corrupto o ilegible detectado en constructor ({corruptos} error/es)",
-                carpeta
-            )
+    pool = ThreadPool(num_hilos)
+    tareas = [(c, catalogo, columnas) for c in carpetas_salida]
+    resultados = pool.map(_procesar_una_carpeta, tareas)
+    pool.close()
+    pool.join()
 
-        if not por_tipo and not eco_existe:
-            print(f"[SALTAR] [{i}/{total_carpetas}] {carpeta.name} -> Vacia (0 JSONs), saltando.")
+    procesadas = 0
+    for res in resultados:
+        if res is None:
             continue
         
-        print(f"[PROCESANDO] [{i}/{total_carpetas}] {carpeta.name} ({cant_jsons} JSONs de documentos)")
+        procesadas += 1
+        if res["corruptos"] > 0:
+            estado_lote.marcar_defectuoso(
+                res["clave"],
+                f"JSON corrupto o ilegible detectado en constructor ({res['corruptos']} error/es)",
+                res["carpeta"]
+            )
 
-        fila = construir_fila(carpeta.name, carpeta, por_tipo, catalogo, columnas)
+        fila = res["fila"]
         id_key = str(fila["numero de identidad del contratado"])
         filas_existentes[id_key] = fila  # sobreescribe o añade este contratado
-
+        print(f"[PROCESANDO] [{procesadas}/{total_carpetas}] {res['clave']} ({res['cant_jsons']} JSONs de documentos)")
 
     # Reconstruir DataFrame respetando el orden de columnas actual
     todas = list(filas_existentes.values())
@@ -280,6 +282,7 @@ def consolidar():
     print(f"  - Total contratados en Excel: {len(todas)}")
     print(f"  - Total columnas generadas : {len(columnas)}")
     print("==================================================")
+
 
 
 
