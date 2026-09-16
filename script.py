@@ -580,6 +580,14 @@ def operacion_dir(lista_carpetas):
             t0 = time.time()
             id_sujeto, sujeto, entidad = obtener_id(carpeta)
             carpeta_salida = OUTPUT_JSON / id_sujeto
+            
+            # ── Limpieza previa: si la carpeta de salida existía, borrar JSONs anteriores para iniciar desde cero ──
+            if carpeta_salida.exists():
+                for json_viejo in carpeta_salida.glob("*.json"):
+                    try:
+                        json_viejo.unlink()
+                    except Exception:
+                        pass
             carpeta_salida.mkdir(parents=True, exist_ok=True)
 
             try:
@@ -636,11 +644,13 @@ def operacion_dir(lista_carpetas):
                     json.dumps(ecumenico, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
 
-                if archivos_fallidos:
-                    log.warning(f"[ADVERTENCIA] {clave}: {archivos_fallidos} archivo(s) fallaron durante la IA")
-
-                # Conteo real en disco + calificación APROBADO o DEFECTUOSO
-                estado.marcar_completado(clave, carpeta_salida)
+                if archivos_fallidos > 0:
+                    motivo = f"{archivos_fallidos} archivo(s) fallaron durante la IA"
+                    log.warning(f"[ADVERTENCIA] {clave}: {motivo}")
+                    estado.marcar_defectuoso(clave, motivo, carpeta_salida)
+                else:
+                    # Conteo real en disco + calificación APROBADO o DEFECTUOSO
+                    estado.marcar_completado(clave, carpeta_salida)
                 log.debug(f"  Tiempo: {time.time() - t0:.1f}s")
 
             except KeyboardInterrupt:
@@ -690,9 +700,9 @@ buscar_dir(RUTA_PADRE, carpetas_totales)
 if MODO == "reintentar":
     log.info("[REINTENTAR] Modo reintentar: buscando carpetas defectuosas...")
     _estado_tmp = EstadoLote(OUTPUT_JSON)
-    _estado_tmp.limpiar_fallidos()
-    # Filtramos para procesar únicamente las carpetas que eran defectuosas
+    # Filtramos primero para identificar exactamente las carpetas que eran defectuosas
     claves_fallidas = set(_estado_tmp.listar_fallidos())
+    _estado_tmp.limpiar_fallidos(claves_fallidas)
     carpetas_a_procesar = [c for c in carpetas_totales if c.name in claves_fallidas]
     if not carpetas_a_procesar:
         # Si no había lista previa específica, busca todas las no aprobadas

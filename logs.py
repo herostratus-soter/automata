@@ -255,17 +255,26 @@ class EstadoLote:
         """Devuelve las claves de las carpetas que quedaron con estado FALLIDO o DEFECTUOSO."""
         return [k for k, v in self.datos.items() if v.get("estado") in ("FALLIDO", "DEFECTUOSO")]
 
-    def limpiar_fallidos(self):
-        """Limpia las entradas defectuosas para que el modo reintentar las vuelva a procesar."""
-        fallidos = self.listar_fallidos()
-        for clave in fallidos:
+    def limpiar_fallidos(self, claves=None):
+        """Limpia las entradas defectuosas para que el modo reintentar las vuelva a procesar.
+
+        Si claves es None, obtiene y limpia todas las marcadas como FALLIDO o DEFECTUOSO.
+        Si claves contiene una lista/conjunto de nombres, limpia solo esas carpetas.
+        """
+        if claves is None:
+            target = self.listar_fallidos()
+        else:
+            target = [c for c in claves if c in self.datos]
+
+        for clave in target:
             self.datos[clave] = {
                 "estado": "PENDIENTE",
                 "archivos": 0
             }
-        self._guardar()
-        self.logger.info(f"[REINTENTAR] {len(fallidos)} carpetas defectuosas marcadas para reprocesamiento")
-        return len(fallidos)
+        if target:
+            self._guardar()
+        self.logger.info(f"[REINTENTAR] {len(target)} carpetas defectuosas marcadas para reprocesamiento")
+        return len(target)
 
     def resumen(self):
         """Retorna (completados, fallidos, pendientes, total)."""
