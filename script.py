@@ -519,34 +519,47 @@ def partir_pdf(ruta_pdf_temp, segmentos):
 
 
 def procesar_compilado(respuestas, datos):
-    """Detecta los 'compilado' en respuestas, los segmenta sobre una copia temporal y arma la petición extra."""
+    """Detecta los 'compilado' en respuestas, los segmenta sobre una copia temporal y arma la petición extra.
+
+    Cada compilado se procesa de forma aislada: si uno falla, se cuenta como
+    archivo fallido y se continúa con el siguiente sin abortar la carpeta.
+    """
 
     compilados = [res[0] for res in respuestas if res[0]["tipo_documento"] == "compilado"]
 
     peticion_segunda = []
     respuestas_seg = []  # tokens del segmentador, aparte, para no perderlos del conteo total
+    compilados_fallidos = 0
 
     for compilado in compilados:
         ruta_original_compilado = Path(compilado["ruta"])
         ruta_temp_compilado = duplicar_temporal(ruta_original_compilado)
+        archivo_nube = None
 
         try:
             schema = schema_segmentador(RUTA_ODS)
             contexto = CONTEXTO_SEGMENTADOR + ods_string(RUTA_ODS)
             archivo_nube = subir_archivo(ruta_temp_compilado)
             respuesta_seg = ia_inspector(archivo_nube, "Segmenta este PDF.", contexto, schema, MODELO_FLASH)
-            eliminar_archivo(archivo_nube.name)
             respuestas_seg.append(respuesta_seg)
 
             segmentos = json.loads(respuesta_seg[0])["segmentos"]
             nuevos = partir_pdf(ruta_temp_compilado, segmentos)  # parte la copia, no el original
+
+            for ruta_seg, id_doc, tipo_doc, rango in nuevos:
+                peticion_segunda.append((ruta_seg, datos, id_doc, tipo_doc, ruta_original_compilado, rango))
+
+        except Exception as e:
+            compilados_fallidos += 1
+            log.error(f"[ERROR] Compilado fallo: {ruta_original_compilado.name} -> {e}")
+
         finally:
-            ruta_temp_compilado.unlink()  # la copia del compilado ya cumplió su función
+            if archivo_nube:
+                eliminar_archivo(archivo_nube.name)
+            if ruta_temp_compilado.exists():
+                ruta_temp_compilado.unlink()
 
-        for ruta_seg, id_doc, tipo_doc, rango in nuevos:
-            peticion_segunda.append((ruta_seg, datos, id_doc, tipo_doc, ruta_original_compilado, rango))
-
-    return peticion_segunda, respuestas_seg
+    return peticion_segunda, respuestas_seg, compilados_fallidos
 
 
 #--------------------------ORQUESTACIÓN----------------
@@ -624,7 +637,8 @@ def operacion_dir(lista_carpetas):
                 respuestas = [r for r in respuestas_raw if r is not None]
 
                 # --- segunda pasada (compilados) ---
-                peticion_segunda, respuestas_seg = procesar_compilado(respuestas, datos)
+                peticion_segunda, respuestas_seg, comp_fallidos = procesar_compilado(respuestas, datos)
+                archivos_fallidos += comp_fallidos
                 if peticion_segunda:
                     respuestas_comp = POOL.map(ciclo_archivo2, peticion_segunda)
                     archivos_fallidos += sum(1 for r in respuestas_comp if r is None)

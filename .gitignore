@@ -3,5 +3,5 @@ __pycache__/
 config.py
 logs/
 tmp/
-
-
+test_bug_segundapasada.py
+logsbug_segundapasada.txt
