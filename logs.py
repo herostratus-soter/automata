@@ -441,9 +441,78 @@ class EstadoCarpeta:
             "motivo": motivo,
         })
 
+    def migrar_desde_jsons(self, rutas_entrada):
+        """Reconstruye el estado interno desde JSONs de salida existentes.
+
+        Migración automática para carpetas procesadas por el código anterior
+        que no tienen _estado_carpeta.json. Lee los JSONs ya generados y
+        determina qué archivos de entrada ya fueron clasificados, evitando
+        reprocesarlos y ahorrando tokens.
+
+        Retorna la cantidad de archivos migrados.
+        """
+        carpeta = self.ruta.parent
+        if not carpeta.exists():
+            return 0
+
+        nombres_entrada = {ruta.name for ruta in rutas_entrada}
+        compilados_con_segmentos = set()
+        migrados = 0
+
+        for json_path in sorted(carpeta.glob("*.json")):
+            if json_path.name.startswith(("0_", "_")):
+                continue
+            try:
+                with open(json_path, encoding="utf-8") as f:
+                    contenido = json.load(f)
+
+                ruta_json = contenido.get("ruta", "")
+                tipo_doc = contenido.get("tipo_documento", "")
+                fiabilidad = contenido.get("fiabilidad", 0)
+
+                # Detectar segmentos de compilado (tienen "páginas" en ruta)
+                if "páginas" in ruta_json or "paginas" in ruta_json:
+                    ruta_compilado = ruta_json.split(" (páginas")[0].split(" (paginas")[0]
+                    compilados_con_segmentos.add(Path(ruta_compilado).name)
+                    continue
+
+                # Clasificación de archivo original
+                nombre = Path(ruta_json).name
+                if nombre in nombres_entrada and nombre not in self.datos.get("archivos", {}):
+                    self.actualizar_archivo(
+                        nombre,
+                        estado="COMPLETADO",
+                        tipo_documento=tipo_doc,
+                        fiabilidad=fiabilidad,
+                        ruta=ruta_json,
+                        migrado=True,
+                    )
+                    migrados += 1
+            except Exception:
+                continue
+
+        # Determinar estado de segmentación de compilados
+        for nombre, info in self.datos.get("archivos", {}).items():
+            if info.get("tipo_documento") == "compilado":
+                if nombre in compilados_con_segmentos:
+                    info["segmentacion"] = "COMPLETADO"
+                else:
+                    # Compilado clasificado pero sin segmentos → necesita segmentación
+                    info["segmentacion"] = "FALLIDO"
+
+        if migrados:
+            self.registrar_iteracion(
+                "MIGRADO", migrados, migrados, 0,
+                "Estado reconstruido desde JSONs existentes (migración automática)"
+            )
+            self.guardar()
+
+        return migrados
+
     def resumen(self):
         """Retorna (completados, fallidos, total) de archivos rastreados."""
         archivos = self.datos.get("archivos", {})
         c = sum(1 for v in archivos.values() if v.get("estado") == "COMPLETADO")
         f = sum(1 for v in archivos.values() if v.get("estado") == "FALLIDO")
         return c, f, len(archivos)
+

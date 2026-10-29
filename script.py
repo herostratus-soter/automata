@@ -671,11 +671,16 @@ def operacion_dir(lista_carpetas):
 
                 # ── Checklist interno: determinar qué archivos necesitan procesamiento ──
                 estado_carpeta = EstadoCarpeta(carpeta_salida)
-                pendientes, ya_ok = estado_carpeta.archivos_pendientes(ruta_archivos)
+
+                # Migración automática: si no hay _estado_carpeta.json pero sí JSONs previos
+                if not estado_carpeta.ruta.exists():
+                    migrados = estado_carpeta.migrar_desde_jsons(ruta_archivos)
+                    if migrados:
+                        log.info(f"  [MIGRACIÓN] {migrados} archivos recuperados de JSONs previos (sin gastar tokens)")
 
                 # Capturar compilados de iteraciones ANTERIORES ANTES de clasificar
-                # (si se capturan después, los recién clasificados aparecen como "pendientes")
                 compilados_previos = estado_carpeta.compilados_pendientes()
+                pendientes, ya_ok = estado_carpeta.archivos_pendientes(ruta_archivos)
 
                 CONTEO_ARCHIVOS += len(pendientes)
 
@@ -683,16 +688,24 @@ def operacion_dir(lista_carpetas):
                     f"[PROCESANDO] [iter {procesadas_en_corrida} | "
                     f"{idx_total}/{len(lista_carpetas)} total | "
                     f"{aprobados_previos} completados previos] "
-                    f"{clave} ({len(ruta_archivos)} archivos, "
-                    f"{ya_ok} ya OK, {len(pendientes)} pendientes)"
+                    f"{clave}"
+                )
+                log.info(
+                    f"  📂 {len(ruta_archivos)} archivos de entrada: "
+                    f"{ya_ok} ya clasificados, "
+                    f"{len(pendientes)} pendientes de clasificación, "
+                    f"{len(compilados_previos)} compilados pendientes de segmentación"
                 )
 
                 # ── Primera pasada: clasificar archivos pendientes ──
                 archivos_fallidos_clasif = 0
                 detalle_fallos = []
                 respuestas = []
+                n_sueltos_ok = 0
+                n_compilados_nuevos = 0
 
                 if pendientes:
+                    log.info(f"  [CLASIFICAR] Enviando {len(pendientes)} archivos a la IA (flash-lite)...")
                     peticion_primera = [(ruta, datos) for ruta in pendientes]
                     respuestas_raw = POOL.map(ciclo_archivo, peticion_primera)
 
@@ -707,6 +720,10 @@ def operacion_dir(lista_carpetas):
                         else:
                             resultado = r[0]
                             respuestas.append(r)
+                            if resultado["tipo_documento"] == "compilado":
+                                n_compilados_nuevos += 1
+                            else:
+                                n_sueltos_ok += 1
                             estado_carpeta.actualizar_archivo(
                                 ruta.name,
                                 estado="COMPLETADO",
@@ -715,17 +732,25 @@ def operacion_dir(lista_carpetas):
                                 ruta=str(ruta),
                             )
 
+                    if archivos_fallidos_clasif:
+                        log.warning(f"  [CLASIFICAR] {n_sueltos_ok + n_compilados_nuevos} OK, {archivos_fallidos_clasif} fallidos")
+                    else:
+                        log.info(f"  [CLASIFICAR] {n_sueltos_ok + n_compilados_nuevos} OK ({n_sueltos_ok} sueltos + {n_compilados_nuevos} compilados nuevos)")
+
                 # ── Reunir compilados pendientes de segmentación (de iteraciones ANTERIORES) ──
                 for comp_info in compilados_previos:
                     ruta_comp = comp_info.get("ruta")
                     if ruta_comp and Path(ruta_comp).exists():
                         fake = [{"tipo_documento": "compilado", "ruta": ruta_comp}, 0, 0, 0, 0]
                         respuestas.append(fake)
-                        log.info(f"  [REINTENTO-SEG] Compilado pendiente de segmentación: {Path(ruta_comp).name}")
                     else:
                         log.warning(f"  [ADVERTENCIA] Compilado previo no encontrado en disco: {ruta_comp}")
 
                 # ── Segunda pasada: segmentar compilados ──
+                total_compilados = n_compilados_nuevos + len(compilados_previos)
+                if total_compilados:
+                    log.info(f"  [SEGMENTAR] {total_compilados} compilados a segmentar (flash)...")
+
                 peticion_segunda, respuestas_seg, comp_fallidos, detalle_comp = procesar_compilado(respuestas, datos)
 
                 # Actualizar estado de segmentación por compilado
@@ -747,6 +772,7 @@ def operacion_dir(lista_carpetas):
                 # ── Verificar segmentos individuales ──
                 seg_fallidos = 0
                 if peticion_segunda:
+                    log.info(f"  [VERIFICAR-SEG] {len(peticion_segunda)} segmentos extraídos, verificando...")
                     respuestas_comp_raw = POOL.map(ciclo_archivo2, peticion_segunda)
 
                     # Agrupar resultados de segmentos por compilado origen
@@ -757,6 +783,7 @@ def operacion_dir(lista_carpetas):
 
                     for ruta_comp_str, resultados_segs in segs_por_comp.items():
                         nombre_comp = Path(ruta_comp_str).name
+                        segs_ok = sum(1 for r in resultados_segs if not _es_fallo(r))
                         segs_fail = sum(1 for r in resultados_segs if _es_fallo(r))
                         if segs_fail > 0:
                             seg_fallidos += segs_fail
@@ -772,8 +799,9 @@ def operacion_dir(lista_carpetas):
                                         "archivo": archivo_seg,
                                         "error": _error_de(r)[:200],
                                     })
-                        # Si todos los segmentos pasaron, la segmentacion ya fue marcada COMPLETADO arriba
 
+                    segs_total_ok = sum(1 for r in respuestas_comp_raw if not _es_fallo(r))
+                    log.info(f"  [VERIFICAR-SEG] {segs_total_ok} segmentos OK, {seg_fallidos} fallidos")
                     respuestas += [r for r in respuestas_comp_raw if not _es_fallo(r)]
 
                 total_fallos = archivos_fallidos_clasif + comp_fallidos + seg_fallidos

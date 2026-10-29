@@ -5,7 +5,7 @@ from pathlib import Path
 from multiprocessing.dummy import Pool as ThreadPool
 
 from config import RUTA_ODS, RUTA_SALIDA_JSON, RUTA_SALIDA_EXCEL, ANIO, MES, HILOS
-from logs import EstadoLote
+from logs import EstadoLote, EstadoCarpeta
 
 
 #--------------------------CONFIGURACIÓN----------------
@@ -86,12 +86,13 @@ def construir_leyenda(catalogo):
 def leer_carpeta_contratado(carpeta_contratado):
     """Lee todos los JSONs de una carpeta en una sola pasada de disco usando os.scandir.
 
-    Retorna: (por_tipo_dict, eco_dict, conteo_corruptos, cant_jsons)
+    Retorna: (por_tipo_dict, eco_dict, errores_detalle, cant_jsons)
+      errores_detalle: lista de {"archivo": str, "error": str}
     """
 
     por_tipo = {}
     eco_dict = {}
-    corruptos = 0
+    errores_detalle = []
     cant_jsons = 0
 
     try:
@@ -105,8 +106,11 @@ def leer_carpeta_contratado(carpeta_contratado):
                     try:
                         with open(entry.path, encoding="utf-8") as f:
                             eco_dict = json.load(f)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        errores_detalle.append({
+                            "archivo": entry.name,
+                            "error": f"Ecuménico ilegible: {e}",
+                        })
                 else:
                     try:
                         with open(entry.path, encoding="utf-8") as f:
@@ -115,13 +119,23 @@ def leer_carpeta_contratado(carpeta_contratado):
                         if tipo:
                             por_tipo.setdefault(tipo, []).append(datos)
                             cant_jsons += 1
+                        else:
+                            errores_detalle.append({
+                                "archivo": entry.name,
+                                "error": "JSON sin campo 'tipo_documento'",
+                            })
                     except Exception as e:
-                        corruptos += 1
-                        print(f"[ADVERTENCIA] JSON corrupto o ilegible en {entry.name} ({carpeta_contratado.name}): {e}")
+                        errores_detalle.append({
+                            "archivo": entry.name,
+                            "error": f"JSON corrupto: {e}",
+                        })
     except Exception as e:
-        print(f"[ADVERTENCIA] Error leyendo carpeta {carpeta_contratado.name}: {e}")
+        errores_detalle.append({
+            "archivo": str(carpeta_contratado.name),
+            "error": f"Error leyendo carpeta: {e}",
+        })
 
-    return por_tipo, eco_dict, corruptos, cant_jsons
+    return por_tipo, eco_dict, errores_detalle, cant_jsons
 
 
 def elegir_mejor(lista_jsons):
@@ -182,19 +196,31 @@ def construir_fila(id_contratado, carpeta_contratado, por_tipo, eco_dict, catalo
 
 
 def _procesar_una_carpeta(args):
-    """Procesa una carpeta de forma aislada (ejecutado en paralelo en el ThreadPool)."""
+    """Procesa una carpeta de forma aislada (ejecutado en paralelo en el ThreadPool).
+
+    Detecta errores y documentos faltantes para reportar a los checklists.
+    """
     carpeta, catalogo, columnas = args
-    por_tipo, eco_dict, corruptos, cant_jsons = leer_carpeta_contratado(carpeta)
+    por_tipo, eco_dict, errores_detalle, cant_jsons = leer_carpeta_contratado(carpeta)
 
     if not por_tipo and not eco_dict:
         return None
 
     fila = construir_fila(carpeta.name, carpeta, por_tipo, eco_dict, catalogo, columnas)
+
+    # Detectar documentos faltantes del catálogo
+    docs_faltantes = []
+    for id_doc in sorted(catalogo):
+        tipo = catalogo[id_doc]["documento"]
+        if tipo not in por_tipo:
+            docs_faltantes.append(tipo)
+
     return {
         "clave": carpeta.name,
         "carpeta": carpeta,
         "fila": fila,
-        "corruptos": corruptos,
+        "errores_detalle": errores_detalle,
+        "docs_faltantes": docs_faltantes,
         "cant_jsons": cant_jsons,
     }
 
@@ -203,7 +229,16 @@ def _procesar_una_carpeta(args):
 
 
 def consolidar():
-    """Lee JSONs de tmp/, actualiza/inserta filas en el Excel en paralelo sin borrar las previas."""
+    """Lee JSONs de salida, construye el Excel y reporta errores a los checklists.
+
+    Flujo:
+      1. Lee catálogo de documentos (reglas_v2.ods)
+      2. Escanea carpetas de salida en paralelo
+      3. Construye fila del Excel para cada contratado
+      4. Detecta errores: JSONs corruptos, documentos faltantes
+      5. Reporta errores a estado_lote.json Y _estado_carpeta.json
+      6. Genera/actualiza el Excel consolidado
+    """
 
     print("==================================================")
     print(" CONSOLIDADOR DE EXCEL - AUTOMATA")
@@ -215,6 +250,7 @@ def consolidar():
     catalogo = leer_catalogo(RUTA_ODS)
     columnas = construir_columnas(catalogo)
     leyenda  = construir_leyenda(catalogo)
+    tipos_catalogo = {catalogo[i]["documento"] for i in catalogo}
 
     # Cargar filas existentes del Excel si ya existe (modo append/update)
     filas_existentes = {}  # { num_id: fila_dict }
@@ -232,38 +268,108 @@ def consolidar():
     total_carpetas = len(carpetas_salida)
 
     num_hilos = min(HILOS, 16) if (HILOS and HILOS > 0) else 10
-    print(f"[INFO] Carpetas encontradas para consolidar: {total_carpetas} (procesando en paralelo con {num_hilos} hilos)")
+    print(f"[INFO] Carpetas encontradas para consolidar: {total_carpetas} (procesando con {num_hilos} hilos)")
     print("--------------------------------------------------")
 
     pool = ThreadPool(num_hilos)
     tareas = [(c, catalogo, columnas) for c in carpetas_salida]
 
+    # Estadísticas de la consolidación
     procesadas = 0
+    carpetas_con_errores = 0
+    total_jsons_corruptos = 0
+    total_docs_faltantes = 0
+    reportes_detalle = []  # para escribir al final fuera del pool
+
     for res in pool.imap_unordered(_procesar_una_carpeta, tareas):
         if res is None:
             continue
-        
+
         procesadas += 1
-        if res["corruptos"] > 0:
-            estado_lote.marcar_defectuoso(
-                res["clave"],
-                f"JSON corrupto o ilegible detectado en constructor ({res['corruptos']} error/es)",
-                res["carpeta"]
-            )
+        errores = res["errores_detalle"]
+        faltantes = res["docs_faltantes"]
+        tiene_problemas = bool(errores) or bool(faltantes)
+
+        if tiene_problemas:
+            carpetas_con_errores += 1
+
+        if errores:
+            total_jsons_corruptos += len(errores)
+
+        if faltantes:
+            total_docs_faltantes += len(faltantes)
+
+        # Guardar para reportar después (fuera del pool, thread-safe)
+        if tiene_problemas:
+            reportes_detalle.append({
+                "clave": res["clave"],
+                "carpeta": res["carpeta"],
+                "errores": errores,
+                "faltantes": faltantes,
+            })
 
         fila = res["fila"]
         id_key = str(fila["numero de identidad del contratado"])
-        filas_existentes[id_key] = fila  # sobreescribe o añade este contratado
-        print(f"[PROCESANDO] [{procesadas}/{total_carpetas}] {res['clave']} ({res['cant_jsons']} JSONs de documentos)")
+        filas_existentes[id_key] = fila
+        print(f"[PROCESANDO] [{procesadas}/{total_carpetas}] {res['clave']} ({res['cant_jsons']} JSONs)")
 
     pool.close()
     pool.join()
+
+    # ── Reportar errores a los checklists (thread-safe, después del pool) ──
+    if reportes_detalle:
+        print(f"\n[INFO] Reportando errores de {len(reportes_detalle)} carpetas a los checklists...")
+
+    for reporte in reportes_detalle:
+        clave = reporte["clave"]
+        carpeta = reporte["carpeta"]
+        errores = reporte["errores"]
+        faltantes = reporte["faltantes"]
+
+        # ── Reportar a _estado_carpeta.json (checklist interno) ──
+        ec = EstadoCarpeta(carpeta)
+        if errores:
+            for err in errores:
+                ec.actualizar_archivo(
+                    err["archivo"],
+                    error_constructor=err["error"],
+                )
+        if faltantes:
+            ec.actualizar_archivo(
+                "_docs_faltantes",
+                documentos_faltantes=faltantes,
+                nota="Documentos del catálogo no encontrados en los JSONs de salida",
+            )
+        ec.guardar()
+
+        # ── Reportar a estado_lote.json (checklist global) ──
+        partes_motivo = []
+        if errores:
+            partes_motivo.append(f"{len(errores)} JSON(s) con error")
+        if faltantes:
+            partes_motivo.append(f"{len(faltantes)} documento(s) faltante(s)")
+        motivo = "Constructor: " + ", ".join(partes_motivo)
+
+        # Solo degradar el estado, nunca mejorar (si ya está COMPLETADO, lo dejamos)
+        estado_actual = estado_lote.datos.get(clave, {}).get("estado", "")
+        if estado_actual not in ("COMPLETADO", "APROBADO"):
+            detalle = []
+            for err in errores[:5]:
+                detalle.append(err)
+            for falt in faltantes[:5]:
+                detalle.append({"archivo": falt, "error": "Documento no encontrado"})
+            estado_lote.marcar_parcial(
+                clave, motivo, carpeta,
+                archivos_ok=0,
+                archivos_fallidos=len(errores) + len(faltantes),
+                detalle_fallos=detalle,
+            )
 
     # Reconstruir DataFrame respetando el orden de columnas actual
     todas = list(filas_existentes.values())
     df = pd.DataFrame(todas, columns=columnas)
 
-    # Convertir a numérico si los IDs son enteros pura cifra (elimina la comilla "'" en Excel)
+    # Convertir a numérico si los IDs son enteros pura cifra
     if col_id in df.columns:
         s = df[col_id].astype(str)
         es_num = s.str.isdigit()
@@ -277,13 +383,22 @@ def consolidar():
         df.to_excel(writer, sheet_name="contratados", index=False)
         leyenda.to_excel(writer, sheet_name="leyenda", index=False)
 
+    # ── Resumen final ──
     print("==================================================")
-    print(f"[OK] Excel actualizado exitosamente!")
-    print(f"  - Total contratados en Excel: {len(todas)}")
-    print(f"  - Total columnas generadas : {len(columnas)}")
+    print(f"  RESUMEN DE CONSOLIDACIÓN")
     print("==================================================")
-
-
+    print(f"  Contratados en el Excel:         {len(todas)}")
+    print(f"  Columnas generadas:              {len(columnas)}")
+    print(f"  Tipos de documento en catálogo:   {len(tipos_catalogo)}")
+    print("--------------------------------------------------")
+    if carpetas_con_errores:
+        print(f"  ⚠ Carpetas con problemas:       {carpetas_con_errores}")
+        print(f"    → JSONs corruptos/inválidos:   {total_jsons_corruptos}")
+        print(f"    → Documentos faltantes:        {total_docs_faltantes}")
+        print(f"  (Errores reportados a estado_lote.json y _estado_carpeta.json)")
+    else:
+        print(f"  ✅ Sin errores detectados")
+    print("==================================================")
 
 
 #--------------------------EJECUCIÓN----------------
