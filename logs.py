@@ -87,6 +87,8 @@ _PATRONES_REINTENTABLES = (
     "connection", "reset", "broken pipe",
     "remotedisconnected", "connectionreset",
     "internal", "server_error",
+    "stream", "ended unexpectedly", "incomplete",
+    "eof", "truncated",
 )
 
 _EXCEPCIONES_PERMANENTES = (

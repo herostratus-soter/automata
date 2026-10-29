@@ -673,6 +673,10 @@ def operacion_dir(lista_carpetas):
                 estado_carpeta = EstadoCarpeta(carpeta_salida)
                 pendientes, ya_ok = estado_carpeta.archivos_pendientes(ruta_archivos)
 
+                # Capturar compilados de iteraciones ANTERIORES ANTES de clasificar
+                # (si se capturan después, los recién clasificados aparecen como "pendientes")
+                compilados_previos = estado_carpeta.compilados_pendientes()
+
                 CONTEO_ARCHIVOS += len(pendientes)
 
                 log.info(
@@ -711,8 +715,7 @@ def operacion_dir(lista_carpetas):
                                 ruta=str(ruta),
                             )
 
-                # ── Reunir compilados pendientes de segmentación (de iteraciones anteriores) ──
-                compilados_previos = estado_carpeta.compilados_pendientes()
+                # ── Reunir compilados pendientes de segmentación (de iteraciones ANTERIORES) ──
                 for comp_info in compilados_previos:
                     ruta_comp = comp_info.get("ruta")
                     if ruta_comp and Path(ruta_comp).exists():
@@ -764,8 +767,9 @@ def operacion_dir(lista_carpetas):
                             )
                             for r in resultados_segs:
                                 if _es_fallo(r):
+                                    archivo_seg = r.get("archivo", f"{nombre_comp} (segmento)") if isinstance(r, dict) else f"{nombre_comp} (segmento)"
                                     detalle_fallos.append({
-                                        "archivo": _error_de(r) if isinstance(r, dict) and r.get("archivo") else f"{nombre_comp} (segmento)",
+                                        "archivo": archivo_seg,
                                         "error": _error_de(r)[:200],
                                     })
                         # Si todos los segmentos pasaron, la segmentacion ya fue marcada COMPLETADO arriba
