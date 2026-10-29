@@ -3,5 +3,6 @@ __pycache__/
 config.py
 logs/
 tmp/
+enviar_a_sergio/
 test_bug_segundapasada.py
 logsbug_segundapasada.txt

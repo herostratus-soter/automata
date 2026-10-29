@@ -21,8 +21,11 @@ Cambios respecto al script original:
 
 import sys
 import time
+import atexit
+import warnings
 import pypdf
 import json
+import logging
 import tempfile
 import uuid
 import shutil
@@ -38,7 +41,11 @@ from config import (
     RUTA_LOGS, MAX_REINTENTOS, ESPERA_BASE,
 )
 
-from logs import reintentar, EstadoLote, configurar_logs
+from logs import reintentar, EstadoLote, EstadoCarpeta, configurar_logs
+
+# Silenciar warnings ruidosos de pypdf que se mezclan con los logs
+logging.getLogger("pypdf").setLevel(logging.CRITICAL)
+warnings.filterwarnings("ignore", module="pypdf")
 
 
 #--------------------------CONFIGURACIÓN----------------
@@ -326,6 +333,22 @@ def contar_tokens(respuestas):
             CONTEO_TOKENS_CACHE += (res[4] or 0)
 
 
+def _es_fallo(resultado):
+    """True si el resultado de ciclo_archivo/ciclo_archivo2 indica fallo."""
+    if resultado is None:
+        return True
+    if isinstance(resultado, dict) and resultado.get("_error"):
+        return True
+    return False
+
+
+def _error_de(resultado):
+    """Extrae el mensaje de error de un resultado fallido."""
+    if isinstance(resultado, dict) and resultado.get("error"):
+        return resultado["error"]
+    return "Error desconocido"
+
+
 #--------------------------ARCHIVOS Y CARPETAS----------------
 
 
@@ -453,7 +476,7 @@ def ciclo_archivo(peticion_archivo):
 
     except Exception as e:
         log.error(f"[ERROR] Archivo fallo: {ruta_original.name} -> {e}")
-        return None
+        return {"_error": True, "archivo": ruta_original.name, "error": str(e)}
 
     finally:
         ruta_temp.unlink()
@@ -490,7 +513,7 @@ def ciclo_archivo2(peticion):
 
     except Exception as e:
         log.error(f"[ERROR] Segmento fallo: {ruta_compilado_original.name} ({rango}) -> {e}")
-        return None
+        return {"_error": True, "archivo": f"{ruta_compilado_original.name} ({rango})", "error": str(e)}
 
     finally:
         ruta_seg.unlink()
@@ -523,6 +546,8 @@ def procesar_compilado(respuestas, datos):
 
     Cada compilado se procesa de forma aislada: si uno falla, se cuenta como
     archivo fallido y se continúa con el siguiente sin abortar la carpeta.
+
+    Retorna: (peticion_segunda, respuestas_seg, compilados_fallidos, detalle_compilados)
     """
 
     compilados = [res[0] for res in respuestas if res[0]["tipo_documento"] == "compilado"]
@@ -530,6 +555,7 @@ def procesar_compilado(respuestas, datos):
     peticion_segunda = []
     respuestas_seg = []  # tokens del segmentador, aparte, para no perderlos del conteo total
     compilados_fallidos = 0
+    detalle_compilados = []  # info por compilado para actualizar _estado_carpeta.json
 
     for compilado in compilados:
         ruta_original_compilado = Path(compilado["ruta"])
@@ -549,9 +575,20 @@ def procesar_compilado(respuestas, datos):
             for ruta_seg, id_doc, tipo_doc, rango in nuevos:
                 peticion_segunda.append((ruta_seg, datos, id_doc, tipo_doc, ruta_original_compilado, rango))
 
+            detalle_compilados.append({
+                "ruta": str(ruta_original_compilado),
+                "estado": "COMPLETADO",
+                "segmentos": len(segmentos),
+            })
+
         except Exception as e:
             compilados_fallidos += 1
             log.error(f"[ERROR] Compilado fallo: {ruta_original_compilado.name} -> {e}")
+            detalle_compilados.append({
+                "ruta": str(ruta_original_compilado),
+                "estado": "FALLIDO",
+                "error": str(e)[:300],
+            })
 
         finally:
             if archivo_nube:
@@ -559,49 +596,54 @@ def procesar_compilado(respuestas, datos):
             if ruta_temp_compilado.exists():
                 ruta_temp_compilado.unlink()
 
-    return peticion_segunda, respuestas_seg, compilados_fallidos
+    return peticion_segunda, respuestas_seg, compilados_fallidos, detalle_compilados
 
 
 #--------------------------ORQUESTACIÓN----------------
 
 
 def operacion_dir(lista_carpetas):
-    """Recorre cada carpeta del lote actualizando el checklist y respetando MAX_CARPETAS."""
+    """Recorre cada carpeta del lote con procesamiento incremental.
+
+    Novedades respecto a la versión original:
+      • NO borra JSONs previos: conserva resultados de iteraciones anteriores.
+      • Usa _estado_carpeta.json para rastrear cada archivo individualmente.
+      • Solo reenvía a la IA los archivos que fallaron o que son nuevos.
+      • Reintenta la segmentación de compilados que fallaron previamente.
+      • Estado PARCIAL: algunos archivos OK, otros fallidos (antes era todo FALLIDO).
+      • Conteo dual: iteración actual + progreso total del lote.
+    """
 
     global CONTEO_ARCHIVOS, CONTEO_DIR
 
     estado = EstadoLote(OUTPUT_JSON)
     estado.inicializar_checklist(lista_carpetas)
+    estado.recuperar_huerfanos()
 
     procesadas_en_corrida = 0
+    aprobados_previos = sum(1 for c in lista_carpetas if estado.ya_completado(c.name))
 
     try:
-        for carpeta in lista_carpetas:
+        for idx_total, carpeta in enumerate(lista_carpetas, 1):
             clave = carpeta.name
 
-            # ── Saltar carpetas ya aprobadas ──
+            # ── Saltar carpetas ya completadas ──
             if estado.ya_completado(clave):
-                log.info(f"[SALTAR] Ya APROBADO: {clave}")
+                log.info(f"[SALTAR] Ya COMPLETADO: {clave}")
                 continue
 
             # ── Verificar límite máximo por corrida ──
             if MAX_CARPETAS and MAX_CARPETAS > 0 and procesadas_en_corrida >= MAX_CARPETAS:
-                log.info(f"[DETENIDO] Limite de {MAX_CARPETAS} carpetas por corrida alcanzado (MAX_CARPETAS={MAX_CARPETAS}). Deteniendo.")
+                log.info(f"[DETENIDO] Limite de {MAX_CARPETAS} carpetas por corrida alcanzado.")
                 break
 
             estado.marcar_en_proceso(clave)
             t0 = time.time()
             id_sujeto, sujeto, entidad = obtener_id(carpeta)
             carpeta_salida = OUTPUT_JSON / id_sujeto
-            
-            # ── Limpieza previa: si la carpeta de salida existía, borrar JSONs anteriores para iniciar desde cero ──
-            if carpeta_salida.exists():
-                for json_viejo in carpeta_salida.glob("*.json"):
-                    try:
-                        json_viejo.unlink()
-                    except Exception:
-                        pass
             carpeta_salida.mkdir(parents=True, exist_ok=True)
+
+            # ── NO se borran JSONs previos: procesamiento incremental ──
 
             try:
                 CONTEO_DIR += 1
@@ -626,27 +668,114 @@ def operacion_dir(lista_carpetas):
 
                 desbloquear_pdfs(carpeta, clave=id_sujeto)
                 ruta_archivos = get_archivos(carpeta, FORMATOS)
-                CONTEO_ARCHIVOS += len(ruta_archivos)
 
-                log.info(f"[PROCESANDO] [{CONTEO_DIR}/{len(lista_carpetas)}] {clave} ({len(ruta_archivos)} archivos de entrada)")
+                # ── Checklist interno: determinar qué archivos necesitan procesamiento ──
+                estado_carpeta = EstadoCarpeta(carpeta_salida)
+                pendientes, ya_ok = estado_carpeta.archivos_pendientes(ruta_archivos)
 
-                # --- primera pasada ---
-                peticion_primera = [(ruta, datos) for ruta in ruta_archivos]
-                respuestas_raw = POOL.map(ciclo_archivo, peticion_primera)
-                archivos_fallidos = sum(1 for r in respuestas_raw if r is None)
-                respuestas = [r for r in respuestas_raw if r is not None]
+                CONTEO_ARCHIVOS += len(pendientes)
 
-                # --- segunda pasada (compilados) ---
-                peticion_segunda, respuestas_seg, comp_fallidos = procesar_compilado(respuestas, datos)
-                archivos_fallidos += comp_fallidos
+                log.info(
+                    f"[PROCESANDO] [iter {procesadas_en_corrida} | "
+                    f"{idx_total}/{len(lista_carpetas)} total | "
+                    f"{aprobados_previos} completados previos] "
+                    f"{clave} ({len(ruta_archivos)} archivos, "
+                    f"{ya_ok} ya OK, {len(pendientes)} pendientes)"
+                )
+
+                # ── Primera pasada: clasificar archivos pendientes ──
+                archivos_fallidos_clasif = 0
+                detalle_fallos = []
+                respuestas = []
+
+                if pendientes:
+                    peticion_primera = [(ruta, datos) for ruta in pendientes]
+                    respuestas_raw = POOL.map(ciclo_archivo, peticion_primera)
+
+                    for ruta, r in zip(pendientes, respuestas_raw):
+                        if _es_fallo(r):
+                            archivos_fallidos_clasif += 1
+                            err = _error_de(r)
+                            detalle_fallos.append({"archivo": ruta.name, "error": err[:200]})
+                            estado_carpeta.actualizar_archivo(
+                                ruta.name, estado="FALLIDO", error=err[:300]
+                            )
+                        else:
+                            resultado = r[0]
+                            respuestas.append(r)
+                            estado_carpeta.actualizar_archivo(
+                                ruta.name,
+                                estado="COMPLETADO",
+                                tipo_documento=resultado["tipo_documento"],
+                                fiabilidad=resultado.get("fiabilidad", 0),
+                                ruta=str(ruta),
+                            )
+
+                # ── Reunir compilados pendientes de segmentación (de iteraciones anteriores) ──
+                compilados_previos = estado_carpeta.compilados_pendientes()
+                for comp_info in compilados_previos:
+                    ruta_comp = comp_info.get("ruta")
+                    if ruta_comp and Path(ruta_comp).exists():
+                        fake = [{"tipo_documento": "compilado", "ruta": ruta_comp}, 0, 0, 0, 0]
+                        respuestas.append(fake)
+                        log.info(f"  [REINTENTO-SEG] Compilado pendiente de segmentación: {Path(ruta_comp).name}")
+                    else:
+                        log.warning(f"  [ADVERTENCIA] Compilado previo no encontrado en disco: {ruta_comp}")
+
+                # ── Segunda pasada: segmentar compilados ──
+                peticion_segunda, respuestas_seg, comp_fallidos, detalle_comp = procesar_compilado(respuestas, datos)
+
+                # Actualizar estado de segmentación por compilado
+                for det in detalle_comp:
+                    nombre_comp = Path(det["ruta"]).name
+                    if det["estado"] == "COMPLETADO":
+                        estado_carpeta.actualizar_archivo(nombre_comp, segmentacion="COMPLETADO")
+                    else:
+                        estado_carpeta.actualizar_archivo(
+                            nombre_comp,
+                            segmentacion="FALLIDO",
+                            segmentacion_error=det.get("error", "")[:300],
+                        )
+                        detalle_fallos.append({
+                            "archivo": f"{nombre_comp} (segmentación)",
+                            "error": det.get("error", "Error en segmentación")[:200],
+                        })
+
+                # ── Verificar segmentos individuales ──
+                seg_fallidos = 0
                 if peticion_segunda:
-                    respuestas_comp = POOL.map(ciclo_archivo2, peticion_segunda)
-                    archivos_fallidos += sum(1 for r in respuestas_comp if r is None)
-                    respuestas += [r for r in respuestas_comp if r is not None]
+                    respuestas_comp_raw = POOL.map(ciclo_archivo2, peticion_segunda)
 
+                    # Agrupar resultados de segmentos por compilado origen
+                    segs_por_comp = {}
+                    for pet, r in zip(peticion_segunda, respuestas_comp_raw):
+                        ruta_comp_orig = str(pet[4])  # ruta_compilado_original
+                        segs_por_comp.setdefault(ruta_comp_orig, []).append(r)
+
+                    for ruta_comp_str, resultados_segs in segs_por_comp.items():
+                        nombre_comp = Path(ruta_comp_str).name
+                        segs_fail = sum(1 for r in resultados_segs if _es_fallo(r))
+                        if segs_fail > 0:
+                            seg_fallidos += segs_fail
+                            estado_carpeta.actualizar_archivo(
+                                nombre_comp,
+                                segmentacion="FALLIDO",
+                                segmentacion_error=f"{segs_fail} segmento(s) fallaron en verificación",
+                            )
+                            for r in resultados_segs:
+                                if _es_fallo(r):
+                                    detalle_fallos.append({
+                                        "archivo": _error_de(r) if isinstance(r, dict) and r.get("archivo") else f"{nombre_comp} (segmento)",
+                                        "error": _error_de(r)[:200],
+                                    })
+                        # Si todos los segmentos pasaron, la segmentacion ya fue marcada COMPLETADO arriba
+
+                    respuestas += [r for r in respuestas_comp_raw if not _es_fallo(r)]
+
+                total_fallos = archivos_fallidos_clasif + comp_fallidos + seg_fallidos
                 contar_tokens(respuestas + respuestas_seg)
 
-                # --- JSON ecuménico de la carpeta ---
+                # ── JSON ecuménico de la carpeta ──
                 ecumenico = {
                     "numero_de_identidad_del_contratado": datos["id"],
                     "nombre_del_contratado":               datos["nombre_contratado"],
@@ -658,21 +787,52 @@ def operacion_dir(lista_carpetas):
                     json.dumps(ecumenico, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
 
-                if archivos_fallidos > 0:
-                    motivo = f"{archivos_fallidos} archivo(s) fallaron durante la IA"
-                    log.warning(f"[ADVERTENCIA] {clave}: {motivo}")
-                    estado.marcar_defectuoso(clave, motivo, carpeta_salida)
-                else:
-                    # Conteo real en disco + calificación APROBADO o DEFECTUOSO
+                # ── Registrar iteración en el checklist interno ──
+                procesados_iter = len(pendientes) + len(compilados_previos)
+                estado_carpeta.registrar_iteracion(
+                    resultado="COMPLETADO" if total_fallos == 0 else "PARCIAL",
+                    procesados=procesados_iter,
+                    exitosos=procesados_iter - archivos_fallidos_clasif - comp_fallidos,
+                    fallidos=total_fallos,
+                    motivo="" if total_fallos == 0 else "; ".join(
+                        f"{d['archivo']}: {d['error'][:80]}" for d in detalle_fallos[:5]
+                    ),
+                )
+                estado_carpeta.guardar()
+
+                # ── Determinar estado final de la carpeta (acumulado de todas las iteraciones) ──
+                total_ok, total_fail, _ = estado_carpeta.resumen()
+                segs_pendientes = len(estado_carpeta.compilados_pendientes())
+
+                if total_fail == 0 and segs_pendientes == 0:
                     estado.marcar_completado(clave, carpeta_salida)
+                else:
+                    motivo_resumen = "; ".join(
+                        f"{d['archivo']}: {d['error'][:80]}" for d in detalle_fallos[:5]
+                    ) if detalle_fallos else f"{total_fail} archivo(s) fallidos, {segs_pendientes} segmentaciones pendientes"
+                    estado.marcar_parcial(
+                        clave, motivo_resumen, carpeta_salida,
+                        archivos_ok=total_ok,
+                        archivos_fallidos=total_fail + segs_pendientes,
+                        detalle_fallos=detalle_fallos[:10],
+                    )
+
                 log.debug(f"  Tiempo: {time.time() - t0:.1f}s")
 
             except KeyboardInterrupt:
+                try:
+                    estado_carpeta.guardar()
+                except Exception:
+                    pass
                 estado.marcar_fallido(clave, "Interrumpido por el usuario", carpeta_salida)
                 log.warning(f"[ADVERTENCIA] Interrumpido durante: {clave}")
                 raise
 
             except Exception as e:
+                try:
+                    estado_carpeta.guardar()
+                except Exception:
+                    pass
                 estado.marcar_fallido(clave, e, carpeta_salida)
                 log.error(f"[ERROR] Carpeta fallo: {clave} -> {e}", exc_info=True)
                 continue
@@ -682,13 +842,19 @@ def operacion_dir(lista_carpetas):
         POOL.join()
 
     # ── Resumen final ──
-    aprobados, defectuosos, pendientes, total = estado.resumen()
-    log.info(f"=== Lote finalizado: {aprobados} APROBADOS, {defectuosos} DEFECTUOSOS, {pendientes} PENDIENTES, {total} TOTAL ===")
-    if defectuosos:
-        log.warning(f"Carpetas defectuosas: {estado.listar_fallidos()}")
+    aprobados, fallidos, parciales, pendientes_count, total = estado.resumen()
+    log.info(
+        f"=== Lote finalizado: {aprobados} COMPLETADOS, "
+        f"{parciales} PARCIALES, {fallidos} FALLIDOS, "
+        f"{pendientes_count} PENDIENTES, {total} TOTAL ==="
+    )
+    if fallidos + parciales:
+        log.warning(f"Carpetas con problemas: {estado.listar_fallidos()}")
 
 
 #--------------------------EJECUCIÓN----------------
+
+T0_GLOBAL = time.time()
 
 MODO = sys.argv[1].lower() if len(sys.argv) > 1 else "prueba"
 
@@ -697,8 +863,8 @@ if MODO in ("--help", "-h", "help", "ayuda"):
 Uso: python script.py [MODO]
 
 Modos disponibles:
-  lote       - Procesa todas las carpetas dentro de RUTA_PADRE. Salta las que ya están APROBADAS en estado_lote.json.
-  reintentar - Busca únicamente las carpetas marcadas como DEFECTUOSO en estado_lote.json y las vuelve a procesar.
+  lote       - Procesa todas las carpetas dentro de RUTA_PADRE. Salta las que ya están COMPLETADAS.
+  reintentar - Busca carpetas FALLIDO/PARCIAL y las reprocesa incrementalmente (solo archivos fallidos).
   prueba     - Ejecuta un ensayo procesando únicamente las primeras carpetas de prueba.
 
 Ejemplos:
@@ -712,14 +878,14 @@ carpetas_totales = []
 buscar_dir(RUTA_PADRE, carpetas_totales)
 
 if MODO == "reintentar":
-    log.info("[REINTENTAR] Modo reintentar: buscando carpetas defectuosas...")
+    log.info("[REINTENTAR] Modo reintentar: buscando carpetas con errores...")
     _estado_tmp = EstadoLote(OUTPUT_JSON)
-    # Filtramos primero para identificar exactamente las carpetas que eran defectuosas
-    claves_fallidas = set(_estado_tmp.listar_fallidos())
-    _estado_tmp.limpiar_fallidos(claves_fallidas)
-    carpetas_a_procesar = [c for c in carpetas_totales if c.name in claves_fallidas]
+    _estado_tmp.recuperar_huerfanos()
+    # Identificar carpetas FALLIDO/PARCIAL (no se resetean, el procesamiento incremental las maneja)
+    claves_pendientes = set(_estado_tmp.listar_fallidos())
+    carpetas_a_procesar = [c for c in carpetas_totales if c.name in claves_pendientes]
     if not carpetas_a_procesar:
-        # Si no había lista previa específica, busca todas las no aprobadas
+        # Buscar todas las no completadas
         carpetas_a_procesar = [c for c in carpetas_totales if not _estado_tmp.ya_completado(c.name)]
     log.info(f"Carpetas a reintentar: {len(carpetas_a_procesar)}")
     operacion_dir(carpetas_a_procesar)
@@ -740,10 +906,18 @@ else:  # MODO == "lote" o por defecto
     operacion_dir(carpetas_totales)
 
 
-log.info(f"cantidad carpetas procesadas : {CONTEO_DIR}")
-log.info(f"cantidad archivos analizados : {CONTEO_ARCHIVOS}")
-log.info(f"total tokens input           : {CONTEO_TOKENS_IN}")
-log.info(f"total tokens output          : {CONTEO_TOKENS_OUT}")
-log.info(f"total tokens total           : {CONTEO_TOKENS_ALL}")
+# ── Resumen final garantizado ──
+def _resumen_final():
+    """Se ejecuta siempre al terminar, incluso si hay crash."""
+    try:
+        log.info(f"=== RESUMEN DE EJECUCIÓN ===")
+        log.info(f"Carpetas procesadas esta corrida : {CONTEO_DIR}")
+        log.info(f"Archivos enviados a la IA        : {CONTEO_ARCHIVOS}")
+        log.info(f"Tokens input                     : {CONTEO_TOKENS_IN:,}")
+        log.info(f"Tokens output                    : {CONTEO_TOKENS_OUT:,}")
+        log.info(f"Tokens total                     : {CONTEO_TOKENS_ALL:,}")
+        log.info(f"Tiempo total                     : {time.time() - T0_GLOBAL:.0f}s")
+    except Exception:
+        pass
 
-
+atexit.register(_resumen_final)

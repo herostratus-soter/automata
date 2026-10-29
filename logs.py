@@ -212,7 +212,9 @@ class EstadoLote:
         return conteo
 
     def ya_completado(self, clave):
-        """True si la carpeta ya fue procesada exitosamente (COMPLETADO o APROBADO)."""
+        """True si la carpeta ya fue procesada exitosamente (COMPLETADO o APROBADO).
+        PARCIAL y FALLIDO retornan False para que sean reprocesadas incrementalmente.
+        """
         estado = self.datos.get(clave, {}).get("estado")
         return estado in ("COMPLETADO", "APROBADO")
 
@@ -246,14 +248,31 @@ class EstadoLote:
             "archivos": jsons_reales
         }
         self._guardar()
-        self.logger.warning(f"  [DEFECTUOSO] {clave} -> {motivo}")
+        self.logger.warning(f"  [FALLIDO] {clave} -> {motivo}")
+
+    def marcar_parcial(self, clave, motivo, carpeta_salida=None, archivos_ok=0, archivos_fallidos=0, detalle_fallos=None):
+        """Marca una carpeta como parcial: algunos archivos OK, otros fallidos."""
+        jsons_reales = self.contar_jsons_reales(carpeta_salida) if carpeta_salida else 0
+        entrada = {
+            "estado": "PARCIAL",
+            "fecha": datetime.now().isoformat(timespec="seconds"),
+            "error": str(motivo)[:500],
+            "archivos": jsons_reales,
+            "archivos_ok": archivos_ok,
+            "archivos_fallidos": archivos_fallidos,
+        }
+        if detalle_fallos:
+            entrada["detalle_fallos"] = detalle_fallos[:10]  # máximo 10 detalles
+        self.datos[clave] = entrada
+        self._guardar()
+        self.logger.warning(f"  [PARCIAL] {clave} -> {archivos_ok} OK, {archivos_fallidos} fallidos: {motivo}")
 
     def marcar_fallido(self, clave, error, carpeta_salida=None):
         self.marcar_defectuoso(clave, error, carpeta_salida)
 
     def listar_fallidos(self):
-        """Devuelve las claves de las carpetas que quedaron con estado FALLIDO o DEFECTUOSO."""
-        return [k for k, v in self.datos.items() if v.get("estado") in ("FALLIDO", "DEFECTUOSO")]
+        """Devuelve las claves de las carpetas que quedaron con estado FALLIDO, DEFECTUOSO o PARCIAL."""
+        return [k for k, v in self.datos.items() if v.get("estado") in ("FALLIDO", "DEFECTUOSO", "PARCIAL")]
 
     def limpiar_fallidos(self, claves=None):
         """Limpia las entradas defectuosas para que el modo reintentar las vuelva a procesar.
@@ -277,8 +296,152 @@ class EstadoLote:
         return len(target)
 
     def resumen(self):
-        """Retorna (completados, fallidos, pendientes, total)."""
+        """Retorna (completados, fallidos, parciales, pendientes, total)."""
         completados = sum(1 for v in self.datos.values() if v.get("estado") in ("COMPLETADO", "APROBADO"))
         fallidos = sum(1 for v in self.datos.values() if v.get("estado") in ("FALLIDO", "DEFECTUOSO"))
+        parciales = sum(1 for v in self.datos.values() if v.get("estado") == "PARCIAL")
         pendientes = sum(1 for v in self.datos.values() if v.get("estado") in ("PENDIENTE", "EN_PROCESO"))
-        return completados, fallidos, pendientes, len(self.datos)
+        return completados, fallidos, parciales, pendientes, len(self.datos)
+
+    def recuperar_huerfanos(self):
+        """Detecta carpetas que quedaron EN_PROCESO de una ejecución anterior (crasheada).
+        Las marca como PARCIAL para que sean reprocesadas incrementalmente.
+        """
+        huerfanos = [
+            k for k, v in self.datos.items()
+            if v.get("estado") == "EN_PROCESO"
+        ]
+        if huerfanos:
+            self.logger.warning(
+                f"[RECUPERAR] {len(huerfanos)} carpetas quedaron EN_PROCESO "
+                f"de una ejecución anterior. Se tratarán como PARCIAL."
+            )
+            for clave in huerfanos:
+                self.datos[clave]["estado"] = "PARCIAL"
+            self._guardar()
+        return len(huerfanos)
+
+
+# ===============================================================
+# CHECKLIST INTERNO POR CARPETA (PROCESAMIENTO INCREMENTAL)
+# ===============================================================
+
+
+class EstadoCarpeta:
+    """Checklist interno de archivos individuales dentro de una carpeta de contratado.
+
+    Archivo: <carpeta_salida>/_estado_carpeta.json
+
+    Rastrea cada archivo de entrada individualmente para permitir
+    procesamiento incremental: solo se reenvían a la IA los archivos
+    que fallaron en iteraciones anteriores, ahorrando tokens y tiempo.
+
+    Estructura:
+    {
+      "iteraciones": [
+        {"numero": 1, "fecha": "...", "resultado": "PARCIAL", ...},
+        {"numero": 2, "fecha": "...", "resultado": "COMPLETADO", ...}
+      ],
+      "archivos": {
+        "CEDULA.jpeg": {
+          "estado": "COMPLETADO",
+          "tipo_documento": "documento_id",
+          "fiabilidad": 1.0,
+          "ruta": "/content/drive/.../CEDULA.jpeg"
+        },
+        "certificados.pdf": {
+          "estado": "COMPLETADO",
+          "tipo_documento": "compilado",
+          "segmentacion": "FALLIDO",
+          "segmentacion_error": "404 NOT_FOUND: model deprecated"
+        }
+      }
+    }
+    """
+
+    ARCHIVO = "_estado_carpeta.json"
+
+    def __init__(self, carpeta_salida):
+        self.ruta = Path(carpeta_salida) / self.ARCHIVO
+        self.datos = self._cargar()
+
+    def _cargar(self):
+        if self.ruta.exists():
+            try:
+                with open(self.ruta, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {"iteraciones": [], "archivos": {}}
+        return {"iteraciones": [], "archivos": {}}
+
+    def guardar(self):
+        """Persiste el estado a disco. Llamar una vez desde el hilo principal."""
+        self.ruta.parent.mkdir(parents=True, exist_ok=True)
+        self.ruta.write_text(
+            json.dumps(self.datos, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def get_archivo(self, nombre):
+        """Retorna la info de un archivo de entrada o None si no está rastreado."""
+        return self.datos.get("archivos", {}).get(nombre)
+
+    def archivos_pendientes(self, rutas_entrada):
+        """De las rutas de entrada, retorna (pendientes, ya_completados_count).
+
+        Pendientes = archivos no rastreados o con estado FALLIDO.
+        Completados = archivos con estado COMPLETADO (se saltan).
+        """
+        pendientes = []
+        ya_ok = 0
+        for ruta in rutas_entrada:
+            info = self.get_archivo(ruta.name)
+            if info and info.get("estado") == "COMPLETADO":
+                ya_ok += 1
+            else:
+                pendientes.append(ruta)
+        return pendientes, ya_ok
+
+    def compilados_pendientes(self):
+        """Retorna info de compilados clasificados OK pero con segmentación fallida o pendiente.
+
+        Incluye compilados donde:
+          - segmentacion == "FALLIDO" (falló en iteración anterior)
+          - segmentacion no existe (se crasheó antes de intentar segmentar)
+        Excluye compilados con segmentacion == "COMPLETADO".
+        """
+        resultado = []
+        for nombre, info in self.datos.get("archivos", {}).items():
+            if (info.get("estado") == "COMPLETADO"
+                    and info.get("tipo_documento") == "compilado"
+                    and info.get("segmentacion") != "COMPLETADO"):
+                resultado.append({"nombre": nombre, **info})
+        return resultado
+
+    def actualizar_archivo(self, nombre, **campos):
+        """Actualiza campos de un archivo. NO persiste automáticamente (llamar guardar())."""
+        if "archivos" not in self.datos:
+            self.datos["archivos"] = {}
+        if nombre not in self.datos["archivos"]:
+            self.datos["archivos"][nombre] = {}
+        self.datos["archivos"][nombre].update(campos)
+
+    def registrar_iteracion(self, resultado, procesados, exitosos, fallidos, motivo=""):
+        """Agrega una entrada al historial de iteraciones. NO persiste automáticamente."""
+        if "iteraciones" not in self.datos:
+            self.datos["iteraciones"] = []
+        self.datos["iteraciones"].append({
+            "numero": len(self.datos["iteraciones"]) + 1,
+            "fecha": datetime.now().isoformat(timespec="seconds"),
+            "resultado": resultado,
+            "archivos_procesados": procesados,
+            "archivos_exitosos": exitosos,
+            "archivos_fallidos": fallidos,
+            "motivo": motivo,
+        })
+
+    def resumen(self):
+        """Retorna (completados, fallidos, total) de archivos rastreados."""
+        archivos = self.datos.get("archivos", {})
+        c = sum(1 for v in archivos.values() if v.get("estado") == "COMPLETADO")
+        f = sum(1 for v in archivos.values() if v.get("estado") == "FALLIDO")
+        return c, f, len(archivos)
